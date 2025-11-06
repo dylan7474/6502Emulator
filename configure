@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PROJECT_NAME="6502Emulator"
+REQUIRED_TOOLS=(gcc make sdl2-config)
+REQUIRED_PKGCONFIG_LIBS=(sdl2 SDL2_mixer SDL2_ttf libcurl)
+
+MISSING_ITEMS=()
+
+print_hint() {
+    local item=$1
+    case "$item" in
+        gcc)
+            echo "    Hint: install build-essential (Debian/Ubuntu) or base-devel (Arch)."
+            ;;
+        make)
+            echo "    Hint: install build-essential (Debian/Ubuntu) or base-devel (Arch)."
+            ;;
+        sdl2-config)
+            echo "    Hint: install the SDL2 development package (e.g., libsdl2-dev or SDL2-devel)."
+            ;;
+        pkg-config)
+            echo "    Hint: install pkg-config (e.g., apt install pkg-config)."
+            ;;
+        sdl2)
+            echo "    Hint: install libsdl2-dev (Debian/Ubuntu) or SDL2-devel (Fedora)."
+            ;;
+        SDL2_mixer)
+            echo "    Hint: install libsdl2-mixer-dev (Debian/Ubuntu) or SDL2_mixer-devel (Fedora)."
+            ;;
+        SDL2_ttf)
+            echo "    Hint: install libsdl2-ttf-dev (Debian/Ubuntu) or SDL2_ttf-devel (Fedora)."
+            ;;
+        libcurl)
+            echo "    Hint: install libcurl4-openssl-dev (Debian/Ubuntu) or libcurl-devel (Fedora)."
+            ;;
+        *)
+            ;;
+    esac
+}
+
+check_tool() {
+    local tool=$1
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "[missing] tool: $tool"
+        print_hint "$tool"
+        MISSING_ITEMS+=("tool:$tool")
+    else
+        echo "[found ] tool: $tool"
+    fi
+}
+
+check_pkgconfig() {
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        echo "[missing] tool: pkg-config"
+        print_hint pkg-config
+        MISSING_ITEMS+=("tool:pkg-config")
+        return 1
+    fi
+    echo "[found ] tool: pkg-config"
+    return 0
+}
+
+check_library() {
+    local lib=$1
+    if pkg-config --exists "$lib"; then
+        echo "[found ] library: $lib"
+    else
+        echo "[missing] library: $lib"
+        print_hint "$lib"
+        MISSING_ITEMS+=("lib:$lib")
+    fi
+}
+
+main() {
+    echo "Checking build prerequisites for $PROJECT_NAME"
+    echo "---------------------------------------------"
+
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+        check_tool "$tool"
+    done
+
+    if check_pkgconfig; then
+        for lib in "${REQUIRED_PKGCONFIG_LIBS[@]}"; do
+            check_library "$lib"
+        done
+    fi
+
+    echo
+    if [ ${#MISSING_ITEMS[@]} -eq 0 ]; then
+        echo "All required tools and libraries are available. You're ready to build!"
+        exit 0
+    else
+        echo "Missing ${#MISSING_ITEMS[@]} requirement(s). Please install the components listed above and re-run ./configure."
+        exit 1
+    fi
+}
+
+main "$@"
