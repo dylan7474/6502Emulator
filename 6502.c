@@ -11,9 +11,10 @@
  * - Logic to load the specific 2001-N KERNAL/BASIC ROMs.
  *
  * NEW:
- * - Moved all 12 "KIL" opcodes (0x*2) to the NOP section,
- * as the PET ROMs use them as part of normal execution.
- * - Updated the linter to reflect this change.
+ * - Added emulation for the character set I/O port (0xE84C).
+ * - render_screen() now respects the KERNAL's character set
+ * choice (Graphics vs. Text), which should fix the "garbage"
+ * characters on boot and display the "READY." prompt correctly.
  */
 
 #include <stdio.h>
@@ -66,6 +67,10 @@ uint8_t char_rom[2048];   // 2KB Character ROM
 #define PIA1_PORTA 0xE810 // KERNAL writes row select here
 #define PIA1_PORTB 0xE812 // KERNAL reads column data from here
 
+// PET Video I/O (mapped to 6522 VIA at 0xE840)
+#define VIA_DDRB 0xE84C // KERNAL writes here to set char ROM
+int pet_char_set = 0;   // 0 = Graphics/Uppercase, 1 = Text/Lowercase
+
 // This matrix holds the state of all 10 rows (8 keys each)
 uint8_t pet_keyboard_matrix[10];
 
@@ -113,6 +118,17 @@ void writeByte(uint16_t addr, uint8_t val) {
     // The 2KB Edit ROM is at 0xE000-0xE7FF
     // The I/O area is 0xE800-0xEFFF
     if (addr >= 0xE000 && addr < 0xE800) return; // Edit ROM
+    
+    // --- NEW: Intercept write to character set select ---
+    if (addr == VIA_DDRB) {
+        // KERNAL writes here to select the character ROM.
+        // Bit 3 being high (e.g., 0x08) selects the lowercase ROM.
+        if (val & 0x08) {
+            pet_char_set = 1; // Use lowercase
+        } else {
+            pet_char_set = 0; // Use graphics
+        }
+    }
     
     // Allow writes to RAM (0x0000-0x7FFF), Screen (0x8000+), and I/O (0xE800+)
     memory[addr] = val;
@@ -334,7 +350,7 @@ int cpu_handle_interrupts(C6502* cpu) {
     return 0;
 }
 
-// ... (cpu_step function - *** UPDATED ***) ...
+// ... (cpu_step function - unchanged) ...
 int cpu_step(C6502* cpu) {
     int cycles = cpu_handle_interrupts(cpu);
     if (cycles > 0) { return cycles; }
@@ -569,7 +585,7 @@ int cpu_step(C6502* cpu) {
         case 0xFF: cycles = 7; eff_addr = am_Absolute_X(cpu, &cycles); value = readByte(eff_addr) + 1; writeByte(eff_addr, value); do_SBC(cpu, value); break;
         case 0xFB: cycles = 7; eff_addr = am_Absolute_Y(cpu, &cycles); value = readByte(eff_addr) + 1; writeByte(eff_addr, value); do_SBC(cpu, value); break;
         case 0xE3: eff_addr = am_Indirect_X(cpu);  value = readByte(eff_addr) + 1; writeByte(eff_addr, value); do_SBC(cpu, value); cycles = 8; break;
-        case 0xF3: cycles = 8; eff_addr = am_Indirect_Y(cpu, &cycles); value = readByte(eff_addr) + 1; writeByte(eff_addr, value); do_SBC(cpu, value); break;
+        case 0xF3: cycles = 8; eff_addr = am_Indirect_Y(cpu, &cycles); value = readByte(eff_addr) + 1; writeByte(eff_addr, value); do_SBC(cpu, value); cycles = 8; break;
 
         // SLO (ASL + ORA)
         case 0x07: eff_addr = am_ZeroPage(cpu);    value = do_ASL(cpu, readByte(eff_addr)); writeByte(eff_addr, value); cpu->reg_A |= value; set_flag_NZ(cpu, cpu->reg_A); cycles = 5; break;
@@ -837,6 +853,12 @@ void render_screen(void) {
             // which is the *second* 1KB of the 2KB character ROM.
             // We'll just use the first 1KB for now.
             uint16_t char_data_addr = (uint16_t)(screen_code & 0x7F) * 8;
+            
+            // --- NEW: Check if we should use the lowercase/text character set ---
+            // The text set is in the second 1KB of the ROM
+            if (pet_char_set == 1) {
+                char_data_addr += 1024; // Add 1KB offset
+            }
             
             for (int row = 0; row < 8; ++row) {
                 uint8_t row_pixels = char_rom[char_data_addr + row];
