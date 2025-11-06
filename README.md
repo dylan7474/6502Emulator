@@ -1,6 +1,6 @@
 # 6502Emulator
 
-6502Emulator is a hobbyist Commodore 64-inspired system emulator written in C with SDL2. It loads bundled ROM images and font data to reproduce the C64 boot experience, render characters, and respond to keyboard input. The goal of the project is to offer a lightweight, hackable codebase for experimenting with 6502 CPU emulation and retro-style graphics/audio.
+6502Emulator is a hobbyist Commodore Pet-inspired system emulator written in C with SDL2. It loads bundled ROM images and font data to reproduce the C64 boot experience, render characters, and respond to keyboard input. The goal of the project is to offer a lightweight, hackable codebase for experimenting with 6502 CPU emulation and retro-style graphics/audio.
 
 ## Build Instructions
 
