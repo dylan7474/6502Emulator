@@ -110,14 +110,11 @@ uint8_t pet_keyboard_matrix[10];
 // --- Memory Access Helpers ---
 
 void update_charset_from_via(void) {
-    uint8_t charset_mask = 0x08; // Video character bank select line on PB3
-    uint8_t pb3_level = 1;
-
-    if (via.ddrb & charset_mask) {
-        pb3_level = (via.orb & charset_mask) != 0;
-    }
-
-    pet_char_set = pb3_level ? 1 : 0;
+    // PET 2001-N charset select is driven by the VIA register at 0xE84C.
+    // Bit 1 selects which 1KB character bank is active:
+    //   0 -> graphics/uppercase
+    //   1 -> text/lowercase
+    pet_char_set = (via.pcr & 0x02) ? 1 : 0;
 }
 
 uint8_t pia_read_porta(void) {
@@ -226,6 +223,7 @@ void writeByte(uint16_t addr, uint8_t val) {
                 break;
             case 0xE84C:
                 via.pcr = val;
+                update_charset_from_via();
                 break;
             case VIA_IFR:
                 via.ifr &= (uint8_t)~val;
