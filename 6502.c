@@ -10,11 +10,8 @@
  * PET's Character Generator ROM.
  * - Logic to load the specific 2001-N KERNAL/BASIC ROMs.
  *
- * NEW:
- * - Added emulation for the character set I/O port (0xE84C).
- * - render_screen() now respects the KERNAL's character set
- * choice (Graphics vs. Text), which should fix the "garbage"
- * characters on boot and display the "READY." prompt correctly.
+ * - Minimal PET I/O register modeling for keyboard PIA and video VIA.
+ * - Character-set selection derived from VIA port/DDR state.
  */
 
 #include <stdio.h>
@@ -63,13 +60,44 @@ uint8_t char_rom[2048];   // 2KB Character ROM
 #define PET_SCREEN_COLS 40
 #define PET_SCREEN_ROWS 25
 
-// PET Keyboard I/O (mapped to a 6520 PIA at 0xE810)
-#define PIA1_PORTA 0xE810 // KERNAL writes row select here
-#define PIA1_PORTB 0xE812 // KERNAL reads column data from here
+// PET Keyboard I/O (6520 PIA1 at 0xE810-0xE813)
+#define PIA1_BASE 0xE810
+#define PIA1_PORTA (PIA1_BASE + 0)
+#define PIA1_CRA   (PIA1_BASE + 1)
+#define PIA1_PORTB (PIA1_BASE + 2)
+#define PIA1_CRB   (PIA1_BASE + 3)
 
-// PET Video I/O (mapped to 6522 VIA at 0xE840)
-#define VIA_DDRB 0xE84C // KERNAL writes here to set char ROM
-int pet_char_set = 0;   // 0 = Graphics/Uppercase, 1 = Text/Lowercase
+// PET Video I/O (6522 VIA at 0xE840-0xE84F)
+#define VIA_BASE 0xE840
+#define VIA_ORB  (VIA_BASE + 0)
+#define VIA_ORA  (VIA_BASE + 1)
+#define VIA_DDRB (VIA_BASE + 2)
+#define VIA_DDRA (VIA_BASE + 3)
+#define VIA_IFR  (VIA_BASE + 13)
+#define VIA_IER  (VIA_BASE + 14)
+
+typedef struct {
+    uint8_t porta;
+    uint8_t portb;
+    uint8_t ddra;
+    uint8_t ddrb;
+    uint8_t cra;
+    uint8_t crb;
+} PetPia;
+
+typedef struct {
+    uint8_t orb;
+    uint8_t ora;
+    uint8_t ddrb;
+    uint8_t ddra;
+    uint8_t pcr;
+    uint8_t ifr;
+    uint8_t ier;
+} PetVia;
+
+PetPia pia1;
+PetVia via;
+int pet_char_set = 0; // 0 = Graphics/Uppercase, 1 = Text/Lowercase
 
 // This matrix holds the state of all 10 rows (8 keys each)
 uint8_t pet_keyboard_matrix[10];
@@ -81,22 +109,62 @@ uint8_t pet_keyboard_matrix[10];
 
 // --- Memory Access Helpers ---
 
+void update_charset_from_via(void) {
+    uint8_t charset_mask = 0x08; // Video character bank select line on PB3
+    uint8_t pb3_level = 1;
+
+    if (via.ddrb & charset_mask) {
+        pb3_level = (via.orb & charset_mask) != 0;
+    }
+
+    pet_char_set = pb3_level ? 1 : 0;
+}
+
+uint8_t pia_read_porta(void) {
+    return (pia1.porta & pia1.ddra) | (0xFF & (uint8_t)~pia1.ddra);
+}
+
+uint8_t pia_read_portb(void) {
+    uint8_t selected_rows = pia1.porta;
+    uint8_t key_state = 0xFF;
+
+    for (int row = 0; row < 8; ++row) {
+        if ((selected_rows & (1 << row)) == 0) {
+            key_state &= pet_keyboard_matrix[row];
+        }
+    }
+
+    return (pia1.portb & pia1.ddrb) | (key_state & (uint8_t)~pia1.ddrb);
+}
+
 /**
  * Reads a single byte from memory.
  * This now intercepts reads from the keyboard I/O port.
  */
 uint8_t readByte(uint16_t addr) {
-    if (addr == PIA1_PORTB) {
-        // KERNAL is reading the keyboard
-        // It selects a row by writing to PIA1_PORTA
-        // The value 0-9 is in memory[PIA1_PORTA]
-        uint8_t row_select = memory[PIA1_PORTA] & 0x0F; // Use lower 4 bits
-        if (row_select < 10) {
-            // Return the state of the selected row
-            // PET keyboard logic is active-low (0 = pressed)
-            return pet_keyboard_matrix[row_select];
+    if (addr >= PIA1_BASE && addr <= PIA1_CRB) {
+        switch (addr) {
+            case PIA1_PORTA:
+                if (pia1.cra & 0x04) return pia_read_porta();
+                return pia1.ddra;
+            case PIA1_PORTB:
+                if (pia1.crb & 0x04) return pia_read_portb();
+                return pia1.ddrb;
+            case PIA1_CRA: return pia1.cra;
+            case PIA1_CRB: return pia1.crb;
         }
-        return 0xFF; // No row selected
+    }
+
+    if (addr >= VIA_BASE && addr <= (VIA_BASE + 0x0F)) {
+        switch (addr) {
+            case VIA_ORB: return (via.orb & via.ddrb) | (0xFF & (uint8_t)~via.ddrb);
+            case VIA_ORA: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
+            case VIA_DDRB: return via.ddrb;
+            case VIA_DDRA: return via.ddra;
+            case VIA_IFR: return via.ifr;
+            case VIA_IER: return via.ier | 0x80;
+            default: return memory[addr];
+        }
     }
     
     return memory[addr];
@@ -119,15 +187,61 @@ void writeByte(uint16_t addr, uint8_t val) {
     // The I/O area is 0xE800-0xEFFF
     if (addr >= 0xE000 && addr < 0xE800) return; // Edit ROM
     
-    // --- NEW: Intercept write to character set select ---
-    if (addr == VIA_DDRB) {
-        // KERNAL writes here to select the character ROM.
-        // Bit 3 being high (e.g., 0x08) selects the lowercase ROM.
-        if (val & 0x08) {
-            pet_char_set = 1; // Use lowercase
-        } else {
-            pet_char_set = 0; // Use graphics
+    if (addr >= PIA1_BASE && addr <= PIA1_CRB) {
+        switch (addr) {
+            case PIA1_PORTA:
+                if (pia1.cra & 0x04) pia1.porta = val;
+                else pia1.ddra = val;
+                break;
+            case PIA1_PORTB:
+                if (pia1.crb & 0x04) pia1.portb = val;
+                else pia1.ddrb = val;
+                break;
+            case PIA1_CRA:
+                pia1.cra = val;
+                break;
+            case PIA1_CRB:
+                pia1.crb = val;
+                break;
         }
+        memory[addr] = val;
+        return;
+    }
+
+    if (addr >= VIA_BASE && addr <= (VIA_BASE + 0x0F)) {
+        switch (addr) {
+            case VIA_ORB:
+                via.orb = val;
+                update_charset_from_via();
+                break;
+            case VIA_ORA:
+                via.ora = val;
+                break;
+            case VIA_DDRB:
+                via.ddrb = val;
+                update_charset_from_via();
+                break;
+            case VIA_DDRA:
+                via.ddra = val;
+                break;
+            case 0xE84C:
+                via.pcr = val;
+                break;
+            case VIA_IFR:
+                via.ifr &= (uint8_t)~val;
+                break;
+            case VIA_IER:
+                if (val & 0x80) {
+                    via.ier |= (val & 0x7F);
+                } else {
+                    via.ier &= (uint8_t)~(val & 0x7F);
+                }
+                break;
+            default:
+                break;
+        }
+        memory[addr] = val;
+        return;
     }
     
     // Allow writes to RAM (0x0000-0x7FFF), Screen (0x8000+), and I/O (0xE800+)
@@ -848,14 +962,10 @@ void render_screen(void) {
             // KERNAL flips bit 7 for reverse video
             int is_reverse = screen_code & 0x80;
             
-            // Look up the 8-byte pixel data for this character
-            // The 2001-N uses the "business" (non-graphics) character set by default
-            // which is the *second* 1KB of the 2KB character ROM.
-            // We'll just use the first 1KB for now.
+            // Look up the 8-byte pixel data for this character.
             uint16_t char_data_addr = (uint16_t)(screen_code & 0x7F) * 8;
             
-            // --- NEW: Check if we should use the lowercase/text character set ---
-            // The text set is in the second 1KB of the ROM
+            // Text/lowercase glyphs are the second 1KB bank.
             if (pet_char_set == 1) {
                 char_data_addr += 1024; // Add 1KB offset
             }
@@ -1053,11 +1163,14 @@ int main(int argc, char* argv[]) {
     C6502 cpu;
     memset(&memory, 0, sizeof(memory));
     memset(&char_rom, 0, sizeof(char_rom));
+    memset(&pia1, 0, sizeof(pia1));
+    memset(&via, 0, sizeof(via));
     
     // Initialize keyboard matrix (all keys up = 0xFF)
     for (int i = 0; i < 10; ++i) {
         pet_keyboard_matrix[i] = 0xFF;
     }
+    update_charset_from_via();
 
     // --- Load PET ROMs ---
     if (!load_pet_roms()) {
