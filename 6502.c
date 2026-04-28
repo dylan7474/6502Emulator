@@ -104,6 +104,8 @@ int pet_char_set = 0; // 0 = Graphics/Uppercase, 1 = Text/Lowercase
 int video_debug_enabled = 0;
 uint32_t video_debug_frame_counter = 0;
 uint32_t video_screen_write_count = 0;
+uint16_t video_last_pc = 0;
+uint8_t video_last_opcode = 0;
 
 void video_debug_log(const char* fmt, ...) {
     if (!video_debug_enabled) {
@@ -280,8 +282,9 @@ void writeByte(uint16_t addr, uint8_t val) {
             uint16_t cell_offset = (uint16_t)(addr - PET_SCREEN_RAM_START);
             uint8_t row = (uint8_t)(cell_offset / PET_SCREEN_COLS);
             uint8_t col = (uint8_t)(cell_offset % PET_SCREEN_COLS);
-            video_debug_log("[video] screen write #%u @0x%04X (r%u,c%u): code=0x%02X\n",
-                            video_screen_write_count, addr, row, col, val);
+            video_debug_log("[video] screen write #%u @0x%04X (r%u,c%u): code=0x%02X (pc=0x%04X op=0x%02X)\n",
+                            video_screen_write_count, addr, row, col, val,
+                            video_last_pc, video_last_opcode);
         }
     }
     
@@ -457,11 +460,12 @@ uint8_t do_ROR(C6502* cpu, uint8_t M) {
 // ... (Interrupt Logic - unchanged) ...
 int cpu_interrupt(C6502* cpu, uint16_t vector_addr, int is_brk) {
     if (is_brk) {
-        // BRK is 1-byte, PC is already pointing at *next* instr.
-        // It pushes PC+1, but since PC is already advanced, we just push PC.
-        pushWord(cpu, cpu->reg_PC); 
+        // BRK increments PC by one extra byte before pushing it.
+        // At this point reg_PC already points to the operand byte,
+        // so push reg_PC + 1 to match 6502 behavior.
+        pushWord(cpu, cpu->reg_PC + 1);
     } else {
-        // IRQ/NMI push the current PC
+        // IRQ/NMI push the current PC.
         pushWord(cpu, cpu->reg_PC);
     }
     
@@ -515,6 +519,8 @@ int cpu_step(C6502* cpu) {
     if (cycles > 0) { return cycles; }
     uint16_t debug_pc_start = cpu->reg_PC;
     uint8_t opcode = readByte(cpu->reg_PC++);
+    video_last_pc = debug_pc_start;
+    video_last_opcode = opcode;
     cycles = 2;
     uint16_t eff_addr = 0;
     uint8_t value = 0;
