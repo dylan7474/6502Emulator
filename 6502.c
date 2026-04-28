@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <math.h> // For audio generation
 #include <SDL.h>
 // No more SDL_ttf!
@@ -59,6 +60,8 @@ uint8_t char_rom[2048];   // 2KB Character ROM
 #define PET_SCREEN_RAM_START 0x8000
 #define PET_SCREEN_COLS 40
 #define PET_SCREEN_ROWS 25
+#define PET_SCREEN_RAM_SIZE (PET_SCREEN_COLS * PET_SCREEN_ROWS)
+#define PET_SCREEN_RAM_END (PET_SCREEN_RAM_START + PET_SCREEN_RAM_SIZE - 1)
 
 // PET Keyboard I/O (6520 PIA1 at 0xE810-0xE813)
 #define PIA1_BASE 0xE810
@@ -98,6 +101,28 @@ typedef struct {
 PetPia pia1;
 PetVia via;
 int pet_char_set = 0; // 0 = Graphics/Uppercase, 1 = Text/Lowercase
+int video_debug_enabled = 0;
+uint32_t video_debug_frame_counter = 0;
+uint32_t video_screen_write_count = 0;
+
+void video_debug_log(const char* fmt, ...) {
+    if (!video_debug_enabled) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
+
+int should_log_screen_write(void) {
+    // Log aggressively during bootstrap, then sample periodically.
+    if (video_screen_write_count < 128) {
+        return 1;
+    }
+    return (video_screen_write_count % 4096) == 0;
+}
 
 // This matrix holds the state of all 10 rows (8 keys each)
 uint8_t pet_keyboard_matrix[10];
@@ -110,11 +135,18 @@ uint8_t pet_keyboard_matrix[10];
 // --- Memory Access Helpers ---
 
 void update_charset_from_via(void) {
+    int old_char_set = pet_char_set;
     // PET 2001-N charset select is driven by the VIA register at 0xE84C.
     // Bit 1 selects which 1KB character bank is active:
     //   0 -> graphics/uppercase
     //   1 -> text/lowercase
     pet_char_set = (via.pcr & 0x02) ? 1 : 0;
+
+    if (pet_char_set != old_char_set) {
+        video_debug_log("[video] charset switch: %s (PCR=0x%02X ORB=0x%02X DDRB=0x%02X)\n",
+                        pet_char_set ? "text/lowercase" : "graphics/uppercase",
+                        via.pcr, via.orb, via.ddrb);
+    }
 }
 
 uint8_t pia_read_porta(void) {
@@ -241,6 +273,17 @@ void writeByte(uint16_t addr, uint8_t val) {
         memory[addr] = val;
         return;
     }
+
+    if (addr >= PET_SCREEN_RAM_START && addr <= PET_SCREEN_RAM_END) {
+        video_screen_write_count++;
+        if (should_log_screen_write()) {
+            uint16_t cell_offset = (uint16_t)(addr - PET_SCREEN_RAM_START);
+            uint8_t row = (uint8_t)(cell_offset / PET_SCREEN_COLS);
+            uint8_t col = (uint8_t)(cell_offset % PET_SCREEN_COLS);
+            video_debug_log("[video] screen write #%u @0x%04X (r%u,c%u): code=0x%02X\n",
+                            video_screen_write_count, addr, row, col, val);
+        }
+    }
     
     // Allow writes to RAM (0x0000-0x7FFF), Screen (0x8000+), and I/O (0xE800+)
     memory[addr] = val;
@@ -315,11 +358,15 @@ uint16_t am_Absolute_Y(C6502* cpu, int* cycles) {
 uint16_t am_Indirect_X(C6502* cpu) {
     uint8_t zp_addr = readByte(cpu->reg_PC++);
     uint16_t lookup_addr = (uint16_t)((zp_addr + cpu->reg_X) & 0xFF);
-    return readWord(lookup_addr);
+    uint8_t lo = readByte(lookup_addr);
+    uint8_t hi = readByte((uint16_t)((lookup_addr + 1) & 0x00FF));
+    return (uint16_t)((hi << 8) | lo);
 }
 uint16_t am_Indirect_Y(C6502* cpu, int* cycles) {
     uint8_t zp_addr = readByte(cpu->reg_PC++);
-    uint16_t base_addr = readWord((uint16_t)zp_addr);
+    uint8_t lo = readByte((uint16_t)zp_addr);
+    uint8_t hi = readByte((uint16_t)((zp_addr + 1) & 0xFF));
+    uint16_t base_addr = (uint16_t)((hi << 8) | lo);
     uint16_t final_addr = base_addr + cpu->reg_Y;
     if ((base_addr & 0xFF00) != (final_addr & 0xFF00)) {
         (*cycles)++;
@@ -752,11 +799,11 @@ SDL_Renderer* renderer = NULL;
 // No more TTF_Font or global texture
 
 // Screen dimensions
-#define CHAR_WIDTH 8
-#define CHAR_HEIGHT 8
+#define PET_CHAR_WIDTH 8
+#define PET_CHAR_HEIGHT 8
 #define PIXEL_SCALE 2 // Scale each 8x8 char to 16x16
-#define WINDOW_WIDTH (PET_SCREEN_COLS * CHAR_WIDTH * PIXEL_SCALE)
-#define WINDOW_HEIGHT (PET_SCREEN_ROWS * CHAR_HEIGHT * PIXEL_SCALE)
+#define WINDOW_WIDTH (PET_SCREEN_COLS * PET_CHAR_WIDTH * PIXEL_SCALE)
+#define WINDOW_HEIGHT (PET_SCREEN_ROWS * PET_CHAR_HEIGHT * PIXEL_SCALE)
 
 // --- Audio Globals ---
 #define AUDIO_SAMPLE_RATE 44100
@@ -904,7 +951,13 @@ int init_sdl(void) {
     if (!window) { /* ... error ... */ return 0; }
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!renderer) { /* ... error ... */ return 0; }
+    if (!renderer) {
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    }
+    if (!renderer) {
+        fprintf(stderr, "SDL renderer creation failed: %s\n", SDL_GetError());
+        return 0;
+    }
     
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     SDL_RenderSetLogicalSize(renderer, WINDOW_WIDTH / PIXEL_SCALE, WINDOW_HEIGHT / PIXEL_SCALE);
@@ -951,6 +1004,14 @@ void render_screen(void) {
 
     SDL_Rect pixel_rect = { 0, 0, PIXEL_SCALE, PIXEL_SCALE };
 
+    video_debug_frame_counter++;
+    if (video_debug_enabled && (video_debug_frame_counter % 60) == 0) {
+        uint8_t top_left = readByte(PET_SCREEN_RAM_START);
+        uint8_t cursor_cell = readByte(PET_SCREEN_RAM_START + 24);
+        video_debug_log("[video] frame=%u charset=%d top_left=0x%02X col24=0x%02X total_screen_writes=%u\n",
+                        video_debug_frame_counter, pet_char_set, top_left, cursor_cell, video_screen_write_count);
+    }
+
     for (int y = 0; y < PET_SCREEN_ROWS; ++y) {
         for (int x = 0; x < PET_SCREEN_COLS; ++x) {
             // Read from PET's screen RAM at 0x8000
@@ -981,8 +1042,8 @@ void render_screen(void) {
                     }
 
                     if (is_pixel_on) {
-                        pixel_rect.x = (x * CHAR_WIDTH + col) * PIXEL_SCALE;
-                        pixel_rect.y = (y * CHAR_HEIGHT + row) * PIXEL_SCALE;
+                        pixel_rect.x = (x * PET_CHAR_WIDTH + col) * PIXEL_SCALE;
+                        pixel_rect.y = (y * PET_CHAR_HEIGHT + row) * PIXEL_SCALE;
                         SDL_RenderFillRect(renderer, &pixel_rect);
                     }
                 }
@@ -1154,8 +1215,17 @@ int check_rom_opcodes() {
 // --- Main Program ---
 int main(int argc, char* argv[]) {
     int check_roms_mode = 0;
-    if (argc > 1 && strcmp(argv[1], "--check-roms") == 0) {
-        check_roms_mode = 1;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--check-roms") == 0) {
+            check_roms_mode = 1;
+        } else if (strcmp(argv[i], "--video-debug") == 0) {
+            video_debug_enabled = 1;
+        }
+    }
+
+    const char* video_debug_env = getenv("PET_VIDEO_DEBUG");
+    if (video_debug_env && strcmp(video_debug_env, "1") == 0) {
+        video_debug_enabled = 1;
     }
     
     C6502 cpu;
@@ -1194,6 +1264,9 @@ int main(int argc, char* argv[]) {
 
     printf("CPU Reset: PC set to 0x%04X (from KERNAL ROM)\n", cpu.reg_PC);
     printf("Starting Commodore PET 2001-N emulation...\n");
+    if (video_debug_enabled) {
+        printf("[video] debug logging enabled (flag --video-debug or PET_VIDEO_DEBUG=1)\n");
+    }
 
     int quit = 0;
     SDL_Event e;
