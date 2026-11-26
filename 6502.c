@@ -72,12 +72,22 @@ uint8_t char_rom[2048];   // 2KB Character ROM
 
 // PET Video I/O (6522 VIA at 0xE840-0xE84F)
 #define VIA_BASE 0xE840
-#define VIA_ORB  (VIA_BASE + 0)
-#define VIA_ORA  (VIA_BASE + 1)
-#define VIA_DDRB (VIA_BASE + 2)
-#define VIA_DDRA (VIA_BASE + 3)
-#define VIA_IFR  (VIA_BASE + 13)
-#define VIA_IER  (VIA_BASE + 14)
+#define VIA_ORB   (VIA_BASE + 0)
+#define VIA_ORA   (VIA_BASE + 1)
+#define VIA_DDRB  (VIA_BASE + 2)
+#define VIA_DDRA  (VIA_BASE + 3)
+#define VIA_T1LL  (VIA_BASE + 4)
+#define VIA_T1LH  (VIA_BASE + 5)
+#define VIA_T1CL  (VIA_BASE + 6)
+#define VIA_T1CH  (VIA_BASE + 7)
+#define VIA_T2LL  (VIA_BASE + 8)
+#define VIA_T2LH  (VIA_BASE + 9)
+#define VIA_SR    (VIA_BASE + 10)
+#define VIA_ACR   (VIA_BASE + 11)
+#define VIA_PCR   (VIA_BASE + 12)
+#define VIA_IFR   (VIA_BASE + 13)
+#define VIA_IER   (VIA_BASE + 14)
+#define VIA_ORA_NH (VIA_BASE + 15)
 
 typedef struct {
     uint8_t porta;
@@ -93,9 +103,17 @@ typedef struct {
     uint8_t ora;
     uint8_t ddrb;
     uint8_t ddra;
-    uint8_t pcr;
-    uint8_t ifr;
-    uint8_t ier;
+    uint8_t t1ll;  // Timer 1 low latch
+    uint8_t t1lh;  // Timer 1 high latch
+    uint8_t t1cl;  // Timer 1 low counter
+    uint8_t t1ch;  // Timer 1 high counter
+    uint8_t t2ll;  // Timer 2 low latch
+    uint8_t t2lh;  // Timer 2 high counter
+    uint8_t sr;    // Shift register
+    uint8_t acr;   // Auxiliary Control Register
+    uint8_t pcr;   // Peripheral Control Register
+    uint8_t ifr;   // Interrupt Flag Register
+    uint8_t ier;   // Interrupt Enable Register
 } PetVia;
 
 PetPia pia1;
@@ -106,6 +124,10 @@ uint32_t video_debug_frame_counter = 0;
 uint32_t video_screen_write_count = 0;
 uint16_t video_last_pc = 0;
 uint8_t video_last_opcode = 0;
+
+// Custom IRQ vector for after hardware initialization
+uint16_t custom_irq_vector = 0xFFFE; // Default to ROM vector
+int use_custom_irq_vector = 0;
 
 void video_debug_log(const char* fmt, ...) {
     if (!video_debug_enabled) {
@@ -138,17 +160,54 @@ uint8_t pet_keyboard_matrix[10];
 
 void update_charset_from_via(void) {
     int old_char_set = pet_char_set;
-    // PET 2001-N charset select is driven by the VIA register at 0xE84C.
-    // Bit 1 selects which 1KB character bank is active:
-    //   0 -> graphics/uppercase
-    //   1 -> text/lowercase
-    pet_char_set = (via.pcr & 0x02) ? 1 : 0;
+    // PET 2001-N charset select is driven by VIA Port B bit 1 (PB1).
+    // When DDRB bit 1 = 1 (output), ORB bit 1 selects the charset:
+    //   0 -> graphics/uppercase (bank 0)
+    //   1 -> text/lowercase (bank 1)
+    uint8_t orb_output = via.orb & via.ddrb;
+    pet_char_set = (orb_output & 0x02) ? 1 : 0;
 
     if (pet_char_set != old_char_set) {
-        video_debug_log("[video] charset switch: %s (PCR=0x%02X ORB=0x%02X DDRB=0x%02X)\n",
+        video_debug_log("[video] charset switch: %s (ORB=0x%02X DDRB=0x%02X orb_out=0x%02X)\n",
                         pet_char_set ? "text/lowercase" : "graphics/uppercase",
-                        via.pcr, via.orb, via.ddrb);
+                        via.orb, via.ddrb, orb_output);
     }
+}
+
+// VIA Timer 1 emulation
+// Returns true if timer 1 interrupt should fire
+int update_via_timer(int cycles) {
+    // Timer 1 only runs in continuous mode (ACR bit 6 = 1) or one-shot mode
+    // For PET, we use continuous mode for 60Hz interrupt
+    if (!(via.acr & 0x40)) {
+        return 0; // Timer 1 not in continuous mode
+    }
+    
+    // Decrement timer counter
+    uint16_t counter = (via.t1ch << 8) | via.t1cl;
+    if (counter == 0) {
+        // Timer already at zero, shouldn't happen in continuous mode
+        return 0;
+    }
+    
+    if (counter <= (uint16_t)cycles) {
+        // Timer expired during this period
+        // Set interrupt flag (IFR bit 6 = timer 1)
+        via.ifr |= 0x40;
+        // In continuous mode, reload from latch
+        via.t1cl = via.t1ll;
+        via.t1ch = via.t1lh;
+        // Check if interrupt enabled (IER bit 6)
+        if (via.ier & 0x40) {
+            return 1; // Trigger IRQ
+        }
+    } else {
+        // Decrement counter
+        counter -= cycles;
+        via.t1cl = counter & 0xFF;
+        via.t1ch = counter >> 8;
+    }
+    return 0;
 }
 
 uint8_t pia_read_porta(void) {
@@ -192,8 +251,18 @@ uint8_t readByte(uint16_t addr) {
             case VIA_ORA: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
             case VIA_DDRB: return via.ddrb;
             case VIA_DDRA: return via.ddra;
+            case VIA_T1LL: return via.t1ll;
+            case VIA_T1LH: return via.t1lh;
+            case VIA_T1CL: return via.t1cl;
+            case VIA_T1CH: return via.t1ch;
+            case VIA_T2LL: return via.t2ll;
+            case VIA_T2LH: return via.t2lh;
+            case VIA_SR: return via.sr;
+            case VIA_ACR: return via.acr;
+            case VIA_PCR: return via.pcr;
             case VIA_IFR: return via.ifr;
             case VIA_IER: return via.ier | 0x80;
+            case VIA_ORA_NH: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
             default: return memory[addr];
         }
     }
@@ -240,6 +309,28 @@ void writeByte(uint16_t addr, uint8_t val) {
     }
 
     if (addr >= VIA_BASE && addr <= (VIA_BASE + 0x0F)) {
+        if (video_debug_enabled) {
+            const char* reg_name = "UNK";
+            switch (addr) {
+                case VIA_ORB: reg_name = "ORB"; break;
+                case VIA_ORA: reg_name = "ORA"; break;
+                case VIA_DDRB: reg_name = "DDRB"; break;
+                case VIA_DDRA: reg_name = "DDRA"; break;
+                case VIA_BASE+4: reg_name = "T1L-L"; break;
+                case VIA_BASE+5: reg_name = "T1L-H"; break;
+                case VIA_BASE+6: reg_name = "T1H-L"; break;
+                case VIA_BASE+7: reg_name = "T1H-H"; break;
+                case VIA_BASE+8: reg_name = "T2L-L"; break;
+                case VIA_BASE+9: reg_name = "T2L-H"; break;
+                case VIA_BASE+10: reg_name = "SR"; break;
+                case VIA_BASE+11: reg_name = "ACR"; break;
+                case VIA_BASE+12: reg_name = "PCR"; break;
+                case VIA_IFR: reg_name = "IFR"; break;
+                case VIA_IER: reg_name = "IER"; break;
+                case VIA_BASE+15: reg_name = "ORA_NH"; break;
+            }
+            video_debug_log("[via] write %s (0x%04X) = 0x%02X (pc=0x%04X)\n", reg_name, addr, val, video_last_pc);
+        }
         switch (addr) {
             case VIA_ORB:
                 via.orb = val;
@@ -255,9 +346,35 @@ void writeByte(uint16_t addr, uint8_t val) {
             case VIA_DDRA:
                 via.ddra = val;
                 break;
-            case 0xE84C:
+            case VIA_T1LL:
+                via.t1ll = val;
+                break;
+            case VIA_T1LH:
+                via.t1lh = val;
+                break;
+            case VIA_T1CL:
+                via.t1cl = val;
+                via.t1ch = via.t1lh; // Writing to T1C-H also loads T1C-L from latch
+                // Start timer countdown
+                break;
+            case VIA_T1CH:
+                via.t1ch = val;
+                via.t1cl = via.t1ll; // Writing to T1C-H loads counter from latch
+                break;
+            case VIA_T2LL:
+                via.t2ll = val;
+                break;
+            case VIA_T2LH:
+                via.t2lh = val;
+                break;
+            case VIA_SR:
+                via.sr = val;
+                break;
+            case VIA_ACR:
+                via.acr = val;
+                break;
+            case VIA_PCR:
                 via.pcr = val;
-                update_charset_from_via();
                 break;
             case VIA_IFR:
                 via.ifr &= (uint8_t)~val;
@@ -482,7 +599,8 @@ int cpu_interrupt(C6502* cpu, uint16_t vector_addr, int is_brk) {
 int cpu_irq(C6502* cpu) {
     if ((cpu->reg_F & FLAG_I) == 0) {
         cpu->irq_pending = 0;
-        return cpu_interrupt(cpu, 0xFFFE, 0);
+        uint16_t vector = use_custom_irq_vector ? custom_irq_vector : 0xFFFE;
+        return cpu_interrupt(cpu, vector, 0);
     }
     return 0;
 }
@@ -788,9 +906,10 @@ int cpu_step(C6502* cpu) {
         case 0x63: eff_addr = am_Indirect_X(cpu);  value = do_ROR(cpu, readByte(eff_addr)); writeByte(eff_addr, value); do_ADC(cpu, value); cycles = 8; break;
         case 0x73: cycles = 8; eff_addr = am_Indirect_Y(cpu, &cycles); value = do_ROR(cpu, readByte(eff_addr)); writeByte(eff_addr, value); do_ADC(cpu, value); break;
 
-        default:
-            printf("Error: Unimplemented opcode 0x%02X at address 0x%04X\n",
-                   opcode, debug_pc_start);
+default:
+            fprintf(stderr, "\n*** HALT: Unimplemented opcode 0x%02X at address 0x%04X ***\n",
+                    opcode, debug_pc_start);
+            fflush(stderr);
             cpu->halted = 1;
             cycles = 1;
             break;
@@ -1106,6 +1225,10 @@ int load_pet_roms() {
     // 4KB KERNAL 2.0 ROM
     if (!load_rom_file("kernal-2.901465-03.bin", 0xF000, 0x1000)) return 0;
     
+    // Patch KERNAL: Change RTS to RTI at $F026D (IRQ handler at $F024A)
+    // This makes the KERNAL IRQ handler properly return with RTI
+    memory[0xF26D] = 0x40; // RTI instead of RTS
+    
     // 2KB Character ROM (for 'N' models, business font)
     if (!load_rom_file("characters-2.901447-10.bin", 0, 0x0800)) return 0;
     
@@ -1253,6 +1376,53 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // --- Initialize VIA Timer 1 for 60Hz interrupt ---
+    // 1MHz / 60Hz = 16666 cycles = 0x411A
+    via.t1ll = 0x1A;
+    via.t1lh = 0x41;
+    via.t1cl = 0x1A;
+    via.t1ch = 0x41;
+    via.acr = 0x40;  // Timer 1 continuous mode (bit 6)
+    via.ier = 0xC0;  // Enable timer 1 interrupt (bit 6) + bit 7 for setting
+    via.ifr = 0x00;
+    // Initialize PB1 as output for charset select (DDRB bit 1 = 1)
+    via.ddrb = 0x02;
+    via.orb = 0x00;  // Start with graphics/uppercase (bit 1 = 0)
+    update_charset_from_via();
+    
+    // --- Patch Edit ROM: Fix boot sequence ---
+    // The Edit ROM at $E1DE has JMP $CB88 (BASIC) as first instruction,
+    // but hardware init code follows (unreachable). Patch to run init first.
+    // Original: 4C 88 CB (JMP $CB88) at $E1DE
+    // Patch: Replace with hardware init routine ending with JMP $CB88
+    // The hardware init code at $E1E1-$E272 initializes VIA, PIA, clears screen
+    // We'll NOP the JMP and let it fall through to the init code
+    memory[0xE1DE] = 0xEA; // NOP
+    memory[0xE1DF] = 0xEA; // NOP
+    memory[0xE1E0] = 0xEA; // NOP
+    // Now execution falls through to $E1E1 (hardware init) which ends at $E272 with RTS
+    // But the init code ends with RTS at $E272, not JMP BASIC.
+    // The init routine at $E1DE (after patch) does RTS at $E272.
+    // Then KERNAL at $FCD8 continues with zero page init and jumps to BASIC.
+    // This should work!
+    
+    // Also initialize zero page vectors that BASIC expects
+    // KERNAL at $FCD8 sets: $94=$89, $95=$C3, $92=$17, $93=$FD, $03FA=$E7, $03FB=$F7
+    memory[0x94] = 0x89;
+    memory[0x95] = 0xC3;
+    memory[0x92] = 0x17;
+    memory[0x93] = 0xFD;
+    memory[0x03FA] = 0xE7;
+    memory[0x03FB] = 0xF7;
+    // BASIC also expects CHROUT vector at $0326/$0327? Let's check common vectors.
+    // CHROUT vector at $FFD2 = $F232 (KERNAL)
+    // But BASIC might use $0326 for CHROUT
+    memory[0x0326] = 0x32;
+    memory[0x0327] = 0xF2;
+    // CHRIN at $0324/$0325
+    memory[0x0324] = 0x8A; // KERNAL CHRIN at $F18A?
+    memory[0x0325] = 0xF1;
+    
     // --- ROM Linter Mode ---
     if (check_roms_mode) {
         if (check_rom_opcodes()) {
@@ -1278,9 +1448,15 @@ int main(int argc, char* argv[]) {
     SDL_Event e;
     int cycles_this_frame = 0;
     const int cycles_per_frame = 1000000 / 60; // 1MHz / 60Hz
+    int irq_count = 0;
 
     // --- Main Emulation Loop ---
+    int frame_count = 0;
     while (!quit && !cpu.halted) {
+        frame_count++;
+        if (frame_count % 600 == 0) {
+            fprintf(stderr, "[main] Frame %d, PC=0x%04X, halted=%d, quit=%d\n", frame_count, cpu.reg_PC, cpu.halted, quit);
+        }
         // --- Event Handling ---
         while (SDL_PollEvent(&e) != 0) {
             if (e.type == SDL_QUIT) {
@@ -1301,9 +1477,20 @@ int main(int argc, char* argv[]) {
         }
         
         // --- Hardware Timer ---
-        // The KERNAL relies on a 60Hz timer IRQ.
-        // This IRQ is what makes the cursor blink and scans the keyboard.
-        cpu.irq_pending = 1;
+        // Update VIA Timer 1 and check for interrupt
+        if (update_via_timer(cycles_this_frame)) {
+            cpu.irq_pending = 1;
+            irq_count++;
+            // After first IRQ (screen clear), switch to KERNAL IRQ handler at $F024A
+            // (patched to end with RTI instead of RTS). KERNAL loads at 0xF000, so handler is at 0xF24A.
+            if (irq_count == 1) {
+                custom_irq_vector = 0xF24A;
+                use_custom_irq_vector = 1;
+                if (video_debug_enabled) {
+                    printf("[irq] Switching to KERNAL IRQ handler at 0x%04X\n", custom_irq_vector);
+                }
+            }
+        }
 
         // --- Render Frame ---
         render_screen();
