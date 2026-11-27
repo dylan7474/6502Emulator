@@ -37,9 +37,9 @@
 
 ### Windows (MSYS2 or MinGW environments)
 1. Ensure SDL2, SDL2_mixer, SDL2_ttf, and libcurl development packages are installed (e.g., via `pacman -S mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_mixer mingw-w64-x86_64-SDL2_ttf mingw-w64-x86_64-curl`).
-2. Use the Windows-specific makefile:
+2. Build with the standard Makefile (cross-compiles via MinGW):
    ```bash
-   make -f Makefile.win
+   make CC=x86_64-w64-mingw32-gcc
    ```
 3. The build outputs `6502.exe` in the project root.
 
