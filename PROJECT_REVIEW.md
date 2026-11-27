@@ -1,3 +1,5 @@
+> **Historical document.** This review was written while the emulator showed corrupted video. The real cause was a mismatched editor ROM (BASIC 1 editor with the BASIC 2 KERNAL), fixed in v0.4, along with the I/O issues listed below. See the Roadmap in `README.md` for current plans.
+
 # Project Review and Next Steps (April 28, 2026)
 
 ## Current status

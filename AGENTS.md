@@ -3,7 +3,7 @@
 ## Project overview
 - This repository contains a single-file C implementation (`6502.c`) of a Commodore PET 2001-N emulator built on SDL2.
 - ROM images (`*.bin`) are treated as read-only data that must be mapped into the 6502 address space exactly as the hardware expects.
-- The emulator boots to the BASIC 2 READY prompt. Use `./6502 --headless N --type "..."` to test without a window (prints the screen as text).
+- The emulator boots to the BASIC 2 READY prompt and loads .PRG files (`--load`). Planned work is in the README Roadmap. Use `./6502 --headless N --type "..."` to test without a window (prints the screen as text).
 
 ## Coding style
 - Follow the existing C conventions in `6502.c`: four-space indentation, brace-on-same-line for function definitions, and `snake_case` identifiers.

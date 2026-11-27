@@ -2,7 +2,7 @@
 
 6502Emulator is a hobbyist Commodore PET 2001-N system emulator written in C with SDL2. It loads bundled ROM images and font data to reproduce the PET boot experience, render characters using the actual character generator ROM, and respond to keyboard input. The goal of the project is to offer a lightweight, hackable codebase for experimenting with 6502 CPU emulation and retro-style graphics/audio.
 
-## Current Status (v0.4)
+## Current Status (v0.5)
 
 **✅ Boots to BASIC.** The emulator now starts like a real 32K PET 2001-N with BASIC 2:
 
@@ -92,6 +92,16 @@ A BASIC program (load address $0401) also gets BASIC's start/variable/array poin
 
 ## Roadmap
 
-- Cassette (.TAP) and IEEE-488 drive emulation (2040/4040 disk images)
-- Provide a debugger overlay for inspecting registers and memory in real time
-- Add cycle-accurate CPU timing and VIA/PIA timer emulation
+### Done
+- **v0.4** — boots to `READY.` with the correct BASIC 2 editor ROM, no ROM patches; real 2001-N I/O (retrace IRQ, keyboard matrix, VIA timers, charset, CB2 sound); SBC/decimal-mode CPU fixes; full-screen rendering; `--headless` / `--type` testing
+- **v0.5** — `.PRG` loading (`--load`, `--run`, drag and drop)
+
+### Next (in rough priority order)
+1. **Automated tests** — a `make test` target that boots headless, types BASIC and checks the screen text, so regressions show up straight away
+2. **LOAD and SAVE from BASIC** — trap the KERNAL tape routines so `SAVE "NAME"` writes `NAME.prg` and `LOAD "NAME"` reads it from a folder on the host
+3. **Held keys for games** — the keyboard currently taps each key; games that read the matrix (e.g. `PEEK(151)`) need keys held down while the PC key is down
+4. **Debugger overlay** — registers, a memory view, breakpoints and single-step, toggled with a function key
+5. **Cassette (.TAP) emulation** — real tape timing on the cassette lines, for software that only exists as tape images
+6. **IEEE-488 disk drives** — a 2040/4040 drive on device 8 with `.D64` images (8050/`.D80` later)
+7. **Other PET models** — a ROM-set option for the original 2001 (BASIC 1) and the 4000/8000 series (BASIC 4, 80 columns via the 6545 CRTC)
+8. **Timing accuracy** — check per-instruction cycle counts and page-crossing penalties against a test suite (e.g. Klaus Dormann's 6502 functional tests)
