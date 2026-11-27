@@ -63,71 +63,76 @@ uint8_t char_rom[2048];   // 2KB Character ROM
 #define PET_SCREEN_RAM_SIZE (PET_SCREEN_COLS * PET_SCREEN_ROWS)
 #define PET_SCREEN_RAM_END (PET_SCREEN_RAM_START + PET_SCREEN_RAM_SIZE - 1)
 
-// PET Keyboard I/O (6520 PIA1 at 0xE810-0xE813)
-#define PIA1_BASE 0xE810
-#define PIA1_PORTA (PIA1_BASE + 0)
-#define PIA1_CRA   (PIA1_BASE + 1)
-#define PIA1_PORTB (PIA1_BASE + 2)
-#define PIA1_CRB   (PIA1_BASE + 3)
+// --- PET 2001-N memory map ---
+//   $0000-$7FFF  RAM (32K)
+//   $8000-$8FFF  1K screen RAM, mirrored four times
+//   $9000-$BFFF  empty expansion ROM sockets (open bus)
+//   $C000-$DFFF  BASIC 2 ROM
+//   $E000-$E7FF  Editor ROM (901447-24)
+//   $E800-$EFFF  I/O: PIA1 $E810 (keyboard), PIA2 $E820 (IEEE-488), VIA $E840
+//   $F000-$FFFF  KERNAL ROM
+#define PET_RAM_TOP     0x8000
+#define PET_IO_START    0xE800
+#define PET_IO_END      0xEFFF
 
-// PET Video I/O (6522 VIA at 0xE840-0xE84F)
-#define VIA_BASE 0xE840
-#define VIA_ORB   (VIA_BASE + 0)
-#define VIA_ORA   (VIA_BASE + 1)
-#define VIA_DDRB  (VIA_BASE + 2)
-#define VIA_DDRA  (VIA_BASE + 3)
-#define VIA_T1LL  (VIA_BASE + 4)
-#define VIA_T1LH  (VIA_BASE + 5)
-#define VIA_T1CL  (VIA_BASE + 6)
-#define VIA_T1CH  (VIA_BASE + 7)
-#define VIA_T2LL  (VIA_BASE + 8)
-#define VIA_T2LH  (VIA_BASE + 9)
-#define VIA_SR    (VIA_BASE + 10)
-#define VIA_ACR   (VIA_BASE + 11)
-#define VIA_PCR   (VIA_BASE + 12)
-#define VIA_IFR   (VIA_BASE + 13)
-#define VIA_IER   (VIA_BASE + 14)
-#define VIA_ORA_NH (VIA_BASE + 15)
+// 6520 PIA register offsets
+#define PIA_PA  0
+#define PIA_CRA 1
+#define PIA_PB  2
+#define PIA_CRB 3
+
+// 6522 VIA register offsets
+#define VIA_ORB   0x0
+#define VIA_ORA   0x1
+#define VIA_DDRB  0x2
+#define VIA_DDRA  0x3
+#define VIA_T1CL  0x4
+#define VIA_T1CH  0x5
+#define VIA_T1LL  0x6
+#define VIA_T1LH  0x7
+#define VIA_T2CL  0x8
+#define VIA_T2CH  0x9
+#define VIA_SR    0xA
+#define VIA_ACR   0xB
+#define VIA_PCR   0xC
+#define VIA_IFR   0xD
+#define VIA_IER   0xE
+#define VIA_ORA_NH 0xF
+
+#define VIA_INT_T2 0x20
+#define VIA_INT_T1 0x40
+
+// 1 MHz CPU, 60 Hz vertical retrace (NTSC 2001-N)
+#define PET_CPU_HZ 1000000
+#define PET_FRAME_CYCLES (PET_CPU_HZ / 60)
+// Vertical blank is roughly the last 20% of a frame
+#define PET_VBLANK_CYCLES (PET_FRAME_CYCLES / 5)
 
 typedef struct {
-    uint8_t porta;
-    uint8_t portb;
-    uint8_t ddra;
-    uint8_t ddrb;
-    uint8_t cra;
-    uint8_t crb;
+    uint8_t pa, pb;     // output registers
+    uint8_t ddra, ddrb;
+    uint8_t cra, crb;   // bits 6/7 are the interrupt flags
 } PetPia;
 
 typedef struct {
-    uint8_t orb;
-    uint8_t ora;
-    uint8_t ddrb;
-    uint8_t ddra;
-    uint8_t t1ll;  // Timer 1 low latch
-    uint8_t t1lh;  // Timer 1 high latch
-    uint8_t t1cl;  // Timer 1 low counter
-    uint8_t t1ch;  // Timer 1 high counter
-    uint8_t t2ll;  // Timer 2 low latch
-    uint8_t t2lh;  // Timer 2 high counter
-    uint8_t sr;    // Shift register
-    uint8_t acr;   // Auxiliary Control Register
-    uint8_t pcr;   // Peripheral Control Register
-    uint8_t ifr;   // Interrupt Flag Register
-    uint8_t ier;   // Interrupt Enable Register
+    uint8_t orb, ora, ddrb, ddra;
+    uint16_t t1_counter, t1_latch;
+    uint16_t t2_counter;
+    uint8_t t2_latch_lo;
+    int t1_armed, t2_armed;
+    uint8_t sr, acr, pcr, ifr, ier;
 } PetVia;
 
-PetPia pia1;
-PetVia via;
+PetPia pia1;   // $E810: keyboard, cassette sense, retrace IRQ
+PetPia pia2;   // $E820: IEEE-488 data
+PetVia via;    // $E840: IEEE handshake, retrace input, charset, sound
 int pet_char_set = 0; // 0 = Graphics/Uppercase, 1 = Text/Lowercase
+uint32_t frame_cycle = 0; // position within the current video frame
 int video_debug_enabled = 0;
 uint32_t video_debug_frame_counter = 0;
 uint32_t video_screen_write_count = 0;
 uint16_t video_last_pc = 0;
 uint8_t video_last_opcode = 0;
-
-// Custom IRQ vector for after hardware initialization
-uint16_t custom_irq_vector = 0xFFFE; // Default to ROM vector
-int use_custom_irq_vector = 0;
 
 void video_debug_log(const char* fmt, ...) {
     if (!video_debug_enabled) {
@@ -148,299 +153,232 @@ int should_log_screen_write(void) {
     return (video_screen_write_count % 4096) == 0;
 }
 
-// This matrix holds the state of all 10 rows (8 keys each)
+// This matrix holds the state of all 10 rows (8 keys each), active low
 uint8_t pet_keyboard_matrix[10];
 
-// We will keep our "fantasy" audio for now, as the KERNAL doesn't touch it.
-#define SOUND_PITCH_ADDR 0x00FD
-#define SOUND_ENABLE_ADDR 0x00FE
 
-
-// --- Memory Access Helpers ---
+// --- PET I/O chips ---
 
 void update_charset_from_via(void) {
     int old_char_set = pet_char_set;
-    // PET 2001-N charset select is driven by VIA Port B bit 1 (PB1).
-    // When DDRB bit 1 = 1 (output), ORB bit 1 selects the charset:
-    //   0 -> graphics/uppercase (bank 0)
-    //   1 -> text/lowercase (bank 1)
-    uint8_t orb_output = via.orb & via.ddrb;
-    pet_char_set = (orb_output & 0x02) ? 1 : 0;
+    // The charset is selected by VIA CA2, driven as a manual output by the
+    // PCR: POKE 59468,12 (CA2 low) = graphics, POKE 59468,14 (CA2 high) = text.
+    pet_char_set = ((via.pcr & 0x0E) == 0x0E) ? 1 : 0;
 
     if (pet_char_set != old_char_set) {
-        video_debug_log("[video] charset switch: %s (ORB=0x%02X DDRB=0x%02X orb_out=0x%02X)\n",
-                        pet_char_set ? "text/lowercase" : "graphics/uppercase",
-                        via.orb, via.ddrb, orb_output);
+        video_debug_log("[video] charset switch: %s (PCR=0x%02X)\n",
+                        pet_char_set ? "text/lowercase" : "graphics/uppercase", via.pcr);
     }
 }
 
-// VIA Timer 1 emulation
-// Returns true if timer 1 interrupt should fire
-int update_via_timer(int cycles) {
-    // Timer 1 only runs in continuous mode (ACR bit 6 = 1) or one-shot mode
-    // For PET, we use continuous mode for 60Hz interrupt
-    if (!(via.acr & 0x40)) {
-        return 0; // Timer 1 not in continuous mode
+int pet_in_vblank(void) {
+    return frame_cycle >= (PET_FRAME_CYCLES - PET_VBLANK_CYCLES);
+}
+
+// Generic 6520 PIA register access. port_a_in/port_b_in are the pin levels
+// seen on input lines.
+uint8_t pia_read(PetPia* p, int reg, uint8_t port_a_in, uint8_t port_b_in) {
+    switch (reg & 3) {
+        case PIA_PA:
+            if (!(p->cra & 0x04)) return p->ddra;
+            p->cra &= 0x3F; // reading the data register clears CA1/CA2 flags
+            return (p->pa & p->ddra) | (port_a_in & (uint8_t)~p->ddra);
+        case PIA_CRA: return p->cra;
+        case PIA_PB:
+            if (!(p->crb & 0x04)) return p->ddrb;
+            p->crb &= 0x3F; // clears CB1/CB2 flags (this acknowledges the retrace IRQ)
+            return (p->pb & p->ddrb) | (port_b_in & (uint8_t)~p->ddrb);
+        default: return p->crb;
     }
-    
-    // Decrement timer counter
-    uint16_t counter = (via.t1ch << 8) | via.t1cl;
-    if (counter == 0) {
-        // Timer already at zero, shouldn't happen in continuous mode
-        return 0;
+}
+
+void pia_write(PetPia* p, int reg, uint8_t val) {
+    switch (reg & 3) {
+        case PIA_PA:
+            if (p->cra & 0x04) p->pa = val; else p->ddra = val;
+            break;
+        case PIA_CRA: p->cra = (p->cra & 0xC0) | (val & 0x3F); break;
+        case PIA_PB:
+            if (p->crb & 0x04) p->pb = val; else p->ddrb = val;
+            break;
+        default: p->crb = (p->crb & 0xC0) | (val & 0x3F); break;
     }
-    
-    if (counter <= (uint16_t)cycles) {
-        // Timer expired during this period
-        // Set interrupt flag (IFR bit 6 = timer 1)
-        via.ifr |= 0x40;
-        // In continuous mode, reload from latch
-        via.t1cl = via.t1ll;
-        via.t1ch = via.t1lh;
-        // Check if interrupt enabled (IER bit 6)
-        if (via.ier & 0x40) {
-            return 1; // Trigger IRQ
+}
+
+int pia_irq(const PetPia* p) {
+    return ((p->cra & 0x81) == 0x81) || ((p->cra & 0x68) == 0x48) ||
+           ((p->crb & 0x81) == 0x81) || ((p->crb & 0x68) == 0x48);
+}
+
+// PIA1 port A inputs: PA0-3 drive the keyboard row decoder (outputs),
+// PA4/PA5 cassette switch sense (high = no key down), PA6 IEEE EOI in,
+// PA7 diagnostic sense (high = normal boot, low = enter the monitor).
+uint8_t pia1_port_a_in(void) {
+    return 0xF0 | (pia1.pa & 0x0F);
+}
+
+// PIA1 port B inputs: the column bits of the selected keyboard row.
+uint8_t pia1_port_b_in(void) {
+    uint8_t row = (uint8_t)((pia1.pa & pia1.ddra) | (uint8_t)~pia1.ddra) & 0x0F;
+    return (row < 10) ? pet_keyboard_matrix[row] : 0xFF;
+}
+
+// VIA port B inputs: PB0 NDAC, PB6 NRFD, PB7 DAV are IEEE handshake lines
+// (pulled high, no devices); PB5 is vertical retrace, low during vblank.
+uint8_t via_port_b_in(void) {
+    return pet_in_vblank() ? 0xDF : 0xFF;
+}
+
+uint8_t via_read(int reg) {
+    switch (reg & 0x0F) {
+        case VIA_ORB: return (via.orb & via.ddrb) | (via_port_b_in() & (uint8_t)~via.ddrb);
+        case VIA_ORA:
+        case VIA_ORA_NH: return (via.ora & via.ddra) | (uint8_t)~via.ddra;
+        case VIA_DDRB: return via.ddrb;
+        case VIA_DDRA: return via.ddra;
+        case VIA_T1CL: via.ifr &= (uint8_t)~VIA_INT_T1; return via.t1_counter & 0xFF;
+        case VIA_T1CH: return via.t1_counter >> 8;
+        case VIA_T1LL: return via.t1_latch & 0xFF;
+        case VIA_T1LH: return via.t1_latch >> 8;
+        case VIA_T2CL: via.ifr &= (uint8_t)~VIA_INT_T2; return via.t2_counter & 0xFF;
+        case VIA_T2CH: return via.t2_counter >> 8;
+        case VIA_SR: return via.sr;
+        case VIA_ACR: return via.acr;
+        case VIA_PCR: return via.pcr;
+        case VIA_IFR: return (via.ifr & 0x7F) | ((via.ifr & via.ier & 0x7F) ? 0x80 : 0);
+        case VIA_IER: return via.ier | 0x80;
+    }
+    return 0xFF;
+}
+
+void via_write(int reg, uint8_t val) {
+    switch (reg & 0x0F) {
+        case VIA_ORB: via.orb = val; break;
+        case VIA_ORA:
+        case VIA_ORA_NH: via.ora = val; break;
+        case VIA_DDRB: via.ddrb = val; break;
+        case VIA_DDRA: via.ddra = val; break;
+        case VIA_T1CL:
+        case VIA_T1LL: via.t1_latch = (via.t1_latch & 0xFF00) | val; break;
+        case VIA_T1CH:
+            via.t1_latch = (uint16_t)((via.t1_latch & 0x00FF) | (val << 8));
+            via.t1_counter = via.t1_latch;
+            via.ifr &= (uint8_t)~VIA_INT_T1;
+            via.t1_armed = 1;
+            break;
+        case VIA_T1LH:
+            via.t1_latch = (uint16_t)((via.t1_latch & 0x00FF) | (val << 8));
+            via.ifr &= (uint8_t)~VIA_INT_T1;
+            break;
+        case VIA_T2CL: via.t2_latch_lo = val; break;
+        case VIA_T2CH:
+            via.t2_counter = (uint16_t)(via.t2_latch_lo | (val << 8));
+            via.ifr &= (uint8_t)~VIA_INT_T2;
+            via.t2_armed = 1;
+            break;
+        case VIA_SR: via.sr = val; break;
+        case VIA_ACR: via.acr = val; break;
+        case VIA_PCR: via.pcr = val; update_charset_from_via(); break;
+        case VIA_IFR: via.ifr &= (uint8_t)~(val & 0x7F); break;
+        case VIA_IER:
+            if (val & 0x80) via.ier |= (val & 0x7F);
+            else via.ier &= (uint8_t)~(val & 0x7F);
+            break;
+    }
+}
+
+// Advance VIA timers and the video frame by the given number of CPU cycles.
+void pet_tick(int cycles) {
+    // Timer 1: one-shot or free-running (ACR bit 6)
+    if (cycles > via.t1_counter) {
+        if (via.t1_armed) {
+            via.ifr |= VIA_INT_T1;
+            if (!(via.acr & 0x40)) via.t1_armed = 0;
         }
+        uint32_t period = (uint32_t)via.t1_latch + 2;
+        uint32_t over = (uint32_t)(cycles - via.t1_counter - 1) % period;
+        via.t1_counter = (uint16_t)(period - 1 - over);
     } else {
-        // Decrement counter
-        counter -= cycles;
-        via.t1cl = counter & 0xFF;
-        via.t1ch = counter >> 8;
+        via.t1_counter -= cycles;
     }
-    return 0;
-}
 
-uint8_t pia_read_porta(void) {
-    // Return actual pin state: outputs drive their register value, inputs float high
-    return (pia1.porta & pia1.ddra) | (0xFF & (uint8_t)~pia1.ddra);
-}
-
-uint8_t pia_read_portb(void) {
-    // Get actual Port A pin state (outputs only where DDRA=1)
-    uint8_t porta_pins = pia1.porta & pia1.ddra;
-    
-    // Find which row is selected (active low - bit 0 = row selected)
-    // The keyboard matrix has 8 rows on PA0-PA7
-    uint8_t key_state = 0xFF; // All columns high (no key pressed)
-    
-    for (int row = 0; row < 8; ++row) {
-        // Check if this row's pin is driven low (selected)
-        if ((porta_pins & (1 << row)) == 0) {
-            // This row is selected, AND with its key matrix state
-            key_state &= pet_keyboard_matrix[row];
+    // Timer 2: one-shot interval timer (pulse counting mode ignored)
+    if (!(via.acr & 0x20)) {
+        if (cycles > via.t2_counter) {
+            if (via.t2_armed) {
+                via.ifr |= VIA_INT_T2;
+                via.t2_armed = 0;
+            }
         }
+        via.t2_counter = (uint16_t)(via.t2_counter - cycles);
     }
-    
-    // Return Port B pin state: outputs drive register, inputs read key matrix
-    return (pia1.portb & pia1.ddrb) | (key_state & (uint8_t)~pia1.ddrb);
+
+    // Video frame: the start of vertical blank pulses PIA1 CB1, which sets
+    // CRB bit 7 and (if CRB bit 0 is set) raises the 60 Hz IRQ.
+    uint32_t vblank_start = PET_FRAME_CYCLES - PET_VBLANK_CYCLES;
+    uint32_t before = frame_cycle;
+    frame_cycle += (uint32_t)cycles;
+    if (before < vblank_start && frame_cycle >= vblank_start) {
+        pia1.crb |= 0x80;
+    }
+    if (frame_cycle >= PET_FRAME_CYCLES) {
+        frame_cycle -= PET_FRAME_CYCLES;
+    }
 }
 
-// Emulator-level keyboard scan (runs during timer IRQ)
-// Scans all 8 rows of PIA1 keyboard matrix
-void scan_keyboard(void) {
-    // Save current PIA CRA
-    uint8_t saved_cra = pia1.cra;
-    
-    // Ensure CRA bit 2 = 1 (Port A register selected)
-    pia1.cra |= 0x04;
-    
-    // For each row (0-7), drive it low and read columns
-    for (int row = 0; row < 8; ++row) {
-        // Drive this row low (active low), others high
-        pia1.porta = ~(1 << row) & 0xFF;
-        // The pia_read_portb function handles reading the key matrix
-        // when Port B is read by the CPU
-    }
-    
-    // Restore Port A to all high (no row selected)
-    pia1.porta = 0xFF;
-    
-    // Restore CRA
-    pia1.cra = saved_cra;
+int pet_irq_line(void) {
+    return pia_irq(&pia1) || pia_irq(&pia2) || (via.ifr & via.ier & 0x7F);
 }
 
-// Emulator-level keyboard scan (runs during timer IRQ)
+uint8_t io_read(uint16_t addr) {
+    // Chip selects are address bits A4 (PIA1), A5 (PIA2), A6 (VIA)
+    if (addr & 0x10) return pia_read(&pia1, addr, pia1_port_a_in(), pia1_port_b_in());
+    if (addr & 0x20) return pia_read(&pia2, addr, 0xFF, 0xFF);
+    if (addr & 0x40) return via_read(addr);
+    return (uint8_t)(addr >> 8);
+}
+
+void io_write(uint16_t addr, uint8_t val) {
+    if (video_debug_enabled && (addr & 0x40)) {
+        video_debug_log("[via] write reg %X = 0x%02X (pc=0x%04X)\n", addr & 0x0F, val, video_last_pc);
+    }
+    if (addr & 0x10) pia_write(&pia1, addr, val);
+    if (addr & 0x20) pia_write(&pia2, addr, val);
+    if (addr & 0x40) via_write(addr, val);
+}
 
 /**
- * Reads a single byte from memory.
- * This now intercepts reads from the keyboard I/O port.
+ * Reads a single byte from the PET address space.
  */
 uint8_t readByte(uint16_t addr) {
-    if (addr >= PIA1_BASE && addr <= PIA1_CRB) {
-        switch (addr) {
-            case PIA1_PORTA:
-                if (pia1.cra & 0x04) return pia_read_porta();
-                return pia1.ddra;
-            case PIA1_PORTB:
-                if (pia1.crb & 0x04) return pia_read_portb();
-                return pia1.ddrb;
-            case PIA1_CRA: return pia1.cra;
-            case PIA1_CRB: return pia1.crb;
-        }
-    }
-
-    if (addr >= VIA_BASE && addr <= (VIA_BASE + 0x0F)) {
-        switch (addr) {
-            case VIA_ORB: return (via.orb & via.ddrb) | (0xFF & (uint8_t)~via.ddrb);
-            case VIA_ORA: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
-            case VIA_DDRB: return via.ddrb;
-            case VIA_DDRA: return via.ddra;
-            case VIA_T1LL: return via.t1ll;
-            case VIA_T1LH: return via.t1lh;
-            case VIA_T1CL: return via.t1cl;
-            case VIA_T1CH: return via.t1ch;
-            case VIA_T2LL: return via.t2ll;
-            case VIA_T2LH: return via.t2lh;
-            case VIA_SR: return via.sr;
-            case VIA_ACR: return via.acr;
-            case VIA_PCR: return via.pcr;
-            case VIA_IFR: return via.ifr;
-            case VIA_IER: return via.ier | 0x80;
-            case VIA_ORA_NH: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
-            default: return memory[addr];
-        }
-}
-    
+    if (addr < PET_RAM_TOP) return memory[addr];
+    if (addr < 0x9000) return memory[PET_SCREEN_RAM_START | (addr & 0x03FF)];
+    if (addr < 0xC000) return (uint8_t)(addr >> 8); // empty sockets: open bus
+    if (addr >= PET_IO_START && addr <= PET_IO_END) return io_read(addr);
     return memory[addr];
 }
- 
+
 /**
- * Writes a single byte to memory.
- * This now intercepts writes to the keyboard I/O port.
+ * Writes a single byte to the PET address space. ROM writes are ignored.
  */
 void writeByte(uint16_t addr, uint8_t val) {
-    // KERNAL/BASIC ROMs are from 0xC000 to 0xFFFF
-    // Screen RAM is 0x8000-0x83E7
-    // I/O is 0xE800+
-    
-    // Prevent writing to ROM
-    if (addr >= 0xC000 && addr < 0xE000) return; // BASIC ROM
-    if (addr >= 0xF000) return; // KERNAL ROM
-    
-    // The 2KB Edit ROM is at 0xE000-0xE7FF
-    // The I/O area is 0xE800-0xEFFF
-    if (addr >= 0xE000 && addr < 0xE800) return; // Edit ROM
-    
-    if (addr >= PIA1_BASE && addr <= PIA1_CRB) {
-        switch (addr) {
-            case PIA1_PORTA:
-                if (pia1.cra & 0x04) pia1.porta = val;
-                else pia1.ddra = val;
-                break;
-            case PIA1_PORTB:
-                if (pia1.crb & 0x04) pia1.portb = val;
-                else pia1.ddrb = val;
-                break;
-            case PIA1_CRA:
-                pia1.cra = val;
-                break;
-            case PIA1_CRB:
-                pia1.crb = val;
-                break;
-        }
+    if (addr < PET_RAM_TOP) {
         memory[addr] = val;
         return;
     }
-
-    if (addr >= VIA_BASE && addr <= (VIA_BASE + 0x0F)) {
-        if (video_debug_enabled) {
-            const char* reg_name = "UNK";
-            switch (addr) {
-                case VIA_ORB: reg_name = "ORB"; break;
-                case VIA_ORA: reg_name = "ORA"; break;
-                case VIA_DDRB: reg_name = "DDRB"; break;
-                case VIA_DDRA: reg_name = "DDRA"; break;
-                case VIA_BASE+4: reg_name = "T1L-L"; break;
-                case VIA_BASE+5: reg_name = "T1L-H"; break;
-                case VIA_BASE+6: reg_name = "T1H-L"; break;
-                case VIA_BASE+7: reg_name = "T1H-H"; break;
-                case VIA_BASE+8: reg_name = "T2L-L"; break;
-                case VIA_BASE+9: reg_name = "T2L-H"; break;
-                case VIA_BASE+10: reg_name = "SR"; break;
-                case VIA_BASE+11: reg_name = "ACR"; break;
-                case VIA_BASE+12: reg_name = "PCR"; break;
-                case VIA_IFR: reg_name = "IFR"; break;
-                case VIA_IER: reg_name = "IER"; break;
-                case VIA_BASE+15: reg_name = "ORA_NH"; break;
-            }
-            video_debug_log("[via] write %s (0x%04X) = 0x%02X (pc=0x%04X)\n", reg_name, addr, val, video_last_pc);
-        }
-        switch (addr) {
-            case VIA_ORB:
-                via.orb = val;
-                update_charset_from_via();
-                break;
-            case VIA_ORA:
-                via.ora = val;
-                break;
-            case VIA_DDRB:
-                via.ddrb = val;
-                update_charset_from_via();
-                break;
-            case VIA_DDRA:
-                via.ddra = val;
-                break;
-            case VIA_T1LL:
-                via.t1ll = val;
-                break;
-            case VIA_T1LH:
-                via.t1lh = val;
-                break;
-            case VIA_T1CL:
-                via.t1cl = val;
-                via.t1ch = via.t1lh; // Writing to T1C-H also loads T1C-L from latch
-                // Start timer countdown
-                break;
-            case VIA_T1CH:
-                via.t1ch = val;
-                via.t1cl = via.t1ll; // Writing to T1C-H loads counter from latch
-                break;
-            case VIA_T2LL:
-                via.t2ll = val;
-                break;
-            case VIA_T2LH:
-                via.t2lh = val;
-                break;
-            case VIA_SR:
-                via.sr = val;
-                break;
-            case VIA_ACR:
-                via.acr = val;
-                break;
-            case VIA_PCR:
-                via.pcr = val;
-                break;
-            case VIA_IFR:
-                via.ifr &= (uint8_t)~val;
-                break;
-            case VIA_IER:
-                if (val & 0x80) {
-                    via.ier |= (val & 0x7F);
-                } else {
-                    via.ier &= (uint8_t)~(val & 0x7F);
-                }
-                break;
-            default:
-                break;
-        }
-        memory[addr] = val;
-        return;
-    }
-
-    if (addr >= PET_SCREEN_RAM_START && addr <= PET_SCREEN_RAM_END) {
+    if (addr < 0x9000) {
+        addr = PET_SCREEN_RAM_START | (addr & 0x03FF);
         video_screen_write_count++;
         if (should_log_screen_write()) {
             uint16_t cell_offset = (uint16_t)(addr - PET_SCREEN_RAM_START);
-            uint8_t row = (uint8_t)(cell_offset / PET_SCREEN_COLS);
-            uint8_t col = (uint8_t)(cell_offset % PET_SCREEN_COLS);
             video_debug_log("[video] screen write #%u @0x%04X (r%u,c%u): code=0x%02X (pc=0x%04X op=0x%02X)\n",
-                            video_screen_write_count, addr, row, col, val,
-                            video_last_pc, video_last_opcode);
+                            video_screen_write_count, addr, cell_offset / PET_SCREEN_COLS,
+                            cell_offset % PET_SCREEN_COLS, val, video_last_pc, video_last_opcode);
         }
+        memory[addr] = val;
+        return;
     }
-    
-    // Allow writes to RAM (0x0000-0x7FFF), Screen (0x8000+), and I/O (0xE800+)
-    memory[addr] = val;
+    if (addr >= PET_IO_START && addr <= PET_IO_END) io_write(addr, val);
 }
 
 // ... (readWord, writeWord, stack helpers - unchanged) ...
@@ -548,6 +486,21 @@ void do_Branch(C6502* cpu, int* cycles, int cond) {
     }
 }
 void do_ADC(C6502* cpu, uint8_t M) {
+    if (cpu->reg_F & FLAG_D) {
+        // NMOS 6502 BCD addition (Z from binary result, N/V from intermediate)
+        uint8_t c = cpu->reg_F & FLAG_C;
+        uint16_t bin = (uint16_t)cpu->reg_A + M + c;
+        int lo = (cpu->reg_A & 0x0F) + (M & 0x0F) + c;
+        if (lo > 9) lo += 6;
+        int hi = (cpu->reg_A >> 4) + (M >> 4) + (lo > 0x0F);
+        set_flag(cpu, FLAG_Z, (bin & 0xFF) == 0);
+        set_flag(cpu, FLAG_N, (hi & 0x08) != 0);
+        set_flag(cpu, FLAG_V, (~(cpu->reg_A ^ M) & (cpu->reg_A ^ (hi << 4)) & 0x80) != 0);
+        if (hi > 9) hi += 6;
+        set_flag(cpu, FLAG_C, hi > 0x0F);
+        cpu->reg_A = (uint8_t)(((hi << 4) | (lo & 0x0F)) & 0xFF);
+        return;
+    }
     uint16_t tmp = (uint16_t)cpu->reg_A + (uint16_t)M + (uint16_t)(cpu->reg_F & FLAG_C);
     set_flag(cpu, FLAG_V, (~(cpu->reg_A ^ M) & (cpu->reg_A ^ tmp) & 0x80) != 0);
     set_flag(cpu, FLAG_C, tmp > 0xFF);
@@ -555,7 +508,20 @@ void do_ADC(C6502* cpu, uint8_t M) {
     set_flag_NZ(cpu, cpu->reg_A);
 }
 void do_SBC(C6502* cpu, uint8_t M) {
-    uint16_t tmp = (uint16_t)cpu->reg_A + (uint16_t)(~M) + (uint16_t)(cpu->reg_F & FLAG_C);
+    uint16_t tmp = (uint16_t)cpu->reg_A + (uint16_t)(uint8_t)(~M) + (uint16_t)(cpu->reg_F & FLAG_C);
+    if (cpu->reg_F & FLAG_D) {
+        // NMOS 6502 BCD subtraction: flags come from the binary result
+        int borrow = (cpu->reg_F & FLAG_C) ? 0 : 1;
+        int lo = (cpu->reg_A & 0x0F) - (M & 0x0F) - borrow;
+        int hi = (cpu->reg_A >> 4) - (M >> 4);
+        if (lo < 0) { lo -= 6; hi--; }
+        if (hi < 0) hi -= 6;
+        set_flag(cpu, FLAG_V, ((cpu->reg_A ^ tmp) & ((uint8_t)~M ^ tmp) & 0x80) != 0);
+        set_flag(cpu, FLAG_C, tmp > 0xFF);
+        set_flag_NZ(cpu, (uint8_t)tmp);
+        cpu->reg_A = (uint8_t)(((hi << 4) | (lo & 0x0F)) & 0xFF);
+        return;
+    }
     set_flag(cpu, FLAG_V, ((cpu->reg_A ^ tmp) & (~M ^ tmp) & 0x80) != 0);
     set_flag(cpu, FLAG_C, tmp > 0xFF);
     cpu->reg_A = (uint8_t)(tmp & 0xFF);
@@ -632,9 +598,7 @@ int cpu_interrupt(C6502* cpu, uint16_t vector_addr, int is_brk) {
 }
 int cpu_irq(C6502* cpu) {
     if ((cpu->reg_F & FLAG_I) == 0) {
-        cpu->irq_pending = 0;
-        uint16_t vector = use_custom_irq_vector ? custom_irq_vector : 0xFFFE;
-        return cpu_interrupt(cpu, vector, 0);
+        return cpu_interrupt(cpu, 0xFFFE, 0);
     }
     return 0;
 }
@@ -659,7 +623,8 @@ int cpu_handle_interrupts(C6502* cpu) {
     if (cpu->nmi_pending) {
         return cpu_nmi(cpu);
     }
-    if (cpu->irq_pending && (cpu->reg_F & FLAG_I) == 0) {
+    // IRQ is level-triggered: it stays asserted until the PIA/VIA flag is cleared
+    if ((cpu->irq_pending || pet_irq_line()) && (cpu->reg_F & FLAG_I) == 0) {
         return cpu_irq(cpu);
     }
     return 0;
@@ -955,6 +920,7 @@ default:
 // --- SDL Globals ---
 SDL_Window* window = NULL;
 SDL_Renderer* renderer = NULL;
+SDL_Texture* screen_texture = NULL;
 // No more TTF_Font or global texture
 
 // Screen dimensions
@@ -969,25 +935,28 @@ SDL_Renderer* renderer = NULL;
 #define AUDIO_AMPLITUDE 2000
 static double audio_phase = 0.0;
 
-// ... (Audio Callback - unchanged, still reads fantasy registers) ...
 void audio_callback(void* userdata, Uint8* stream, int len) {
     (void)userdata;
     Sint16* buffer = (Sint16*)stream;
     int num_samples = len / sizeof(Sint16);
-    uint8_t sound_enable = readByte(SOUND_ENABLE_ADDR);
-    uint8_t pitch_val = readByte(SOUND_PITCH_ADDR);
-    if (sound_enable == 0 || pitch_val == 0) {
+    // PET sound: the VIA shift register in free-running mode (ACR bits 2-4 =
+    // 100, i.e. POKE 59467,16) clocks the SR pattern out of CB2 at the
+    // timer 2 rate. POKE 59466 sets the pattern, POKE 59464 the pitch.
+    int sr_free_run = (via.acr & 0x1C) == 0x10;
+    uint8_t pattern = via.sr;
+    if (!sr_free_run || pattern == 0x00 || pattern == 0xFF) {
         memset(buffer, 0, len);
         return;
     }
-    double base_freq = 110.0;
-    double freq = base_freq * pow(2.0, (double)pitch_val / 48.0);
-    double phase_inc = (2.0 * M_PI * freq) / AUDIO_SAMPLE_RATE;
+    // Each SR bit lasts (T2 low latch + 2) cycles; 8 bits per pattern pass.
+    double bit_hz = (double)PET_CPU_HZ / (2.0 * ((double)via.t2_latch_lo + 2.0));
+    double bit_inc = bit_hz / AUDIO_SAMPLE_RATE;
     for (int i = 0; i < num_samples; ++i) {
-        buffer[i] = (sin(audio_phase) > 0) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
-        audio_phase += phase_inc;
-        if (audio_phase > 2.0 * M_PI) {
-            audio_phase -= 2.0 * M_PI;
+        int bit = ((int)audio_phase) & 7;
+        buffer[i] = (pattern & (0x80 >> bit)) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
+        audio_phase += bit_inc;
+        if (audio_phase >= 8.0) {
+            audio_phase -= 8.0 * (int)(audio_phase / 8.0);
         }
     }
 }
@@ -995,106 +964,125 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 
 // --- I/O Helpers ---
 
-/**
- * Maps an SDL key to the PET's 10x8 matrix.
- * Returns 1 if a key was mapped, 0 otherwise.
- */
-int map_sdl_key_to_pet(SDL_Keycode key, int press) {
-    uint8_t row = 0, col_mask = 0;
-    
-    // This is a partial map based on a common PET layout
-    switch (key) {
-        // Row 0
-        case SDLK_LEFT:   row = 0; col_mask = 0x80; break; // Cursor Left/Right
-        case SDLK_F1:     row = 0; col_mask = 0x40; break; // F1
-        case SDLK_F3:     row = 0; col_mask = 0x20; break; // F3
-        case SDLK_F5:     row = 0; col_mask = 0x10; break; // F5
-        case SDLK_F7:     row = 0; col_mask = 0x08; break; // F7
-        case SDLK_UP:     row = 0; col_mask = 0x04; break; // Cursor Up/Down
-        case SDLK_RETURN: row = 0; col_mask = 0x02; break; // RETURN
-        case SDLK_BACKSPACE: row = 0; col_mask = 0x01; break; // DEL (mapped from backspace)
-        
-        // Row 1
-        case SDLK_SPACE:  row = 1; col_mask = 0x80; break; // SPACE
-        case SDLK_q:      row = 1; col_mask = 0x40; break; // Q
-        case SDLK_a:      row = 1; col_mask = 0x20; break; // A
-        case SDLK_z:      row = 1; col_mask = 0x10; break; // Z
-        case SDLK_LSHIFT: row = 1; col_mask = 0x08; break; // L-SHIFT
-        case SDLK_e:      row = 1; col_mask = 0x04; break; // E
-        case SDLK_s:      row = 1; col_mask = 0x02; break; // S
-        case SDLK_x:      row = 1; col_mask = 0x01; break; // X
+// The editor ROM's key decode table ($E6F8), 80 entries: index k is
+// keyboard row 9 - k/8, column bit 7 - k%8. 0x00 = SHIFT, 0xFF = no key.
+static const uint8_t pet_key_table[80] = {
+    '=', '.', 0xFF, 0x03, '<', ' ', '[', 0x12,     // row 9 (0x03 STOP, 0x12 RVS)
+    '-', '0', 0x00, '>', 0xFF, ']', '@', 0x00,     // row 8 (SHIFT at cols 5, 0)
+    '+', '2', 0xFF, '?', ',', 'N', 'V', 'X',       // row 7
+    '3', '1', 0x0D, ';', 'M', 'B', 'C', 'Z',       // row 6 (0x0D RETURN)
+    '*', '5', 0xFF, ':', 'K', 'H', 'F', 'S',       // row 5
+    '6', '4', 0xFF, 'L', 'J', 'G', 'D', 'A',       // row 4
+    '/', '8', 0xFF, 'P', 'I', 'Y', 'R', 'W',       // row 3
+    '9', '7', '^', 'O', 'U', 'T', 'E', 'Q',        // row 2 ('^' = up arrow)
+    0x14, 0x11, 0xFF, ')', '\\', '\'', '$', '"',   // row 1 (0x14 DEL, 0x11 CRSR DOWN)
+    0x1D, 0x13, '_', '(', '&', '%', '#', '!',      // row 0 (0x1D CRSR RIGHT, 0x13 HOME, '_' = left arrow)
+};
+#define PET_SHIFT_ROW 8
+#define PET_SHIFT_COL 0
 
-        // Row 2
-        case SDLK_c:      row = 2; col_mask = 0x80; break; // C
-        case SDLK_d:      row = 2; col_mask = 0x40; break; // D
-        case SDLK_w:      row = 2; col_mask = 0x20; break; // W
-        case SDLK_RSHIFT: row = 2; col_mask = 0x10; break; // R-SHIFT
-        case SDLK_v:      row = 2; col_mask = 0x08; break; // V
-        case SDLK_f:      row = 2; col_mask = 0x04; break; // F
-        case SDLK_r:      row = 2; col_mask = 0x02; break; // R
-        case SDLK_b:      row = 2; col_mask = 0x01; break; // B
+// Queue of PET key presses. Each press is held for a few frames so the
+// editor's 60 Hz scan sees it, then released before the next one.
+#define KEY_QUEUE_SIZE 256
+#define KEY_HOLD_FRAMES 3
+#define KEY_GAP_FRAMES 2
+typedef struct { uint8_t pet_code; uint8_t shift; } PetKeyPress;
+static PetKeyPress key_queue[KEY_QUEUE_SIZE];
+static int key_queue_head = 0, key_queue_tail = 0, key_timer = 0, key_down = 0;
 
-        // Row 3
-        case SDLK_n:      row = 3; col_mask = 0x80; break; // N
-        case SDLK_g:      row = 3; col_mask = 0x40; break; // G
-        case SDLK_t:      row = 3; col_mask = 0x20; break; // T
-        case SDLK_m:      row = 3; col_mask = 0x10; break; // M
-        case SDLK_h:      row = 3; col_mask = 0x08; break; // H
-        case SDLK_y:      row = 3; col_mask = 0x04; break; // Y
-        case SDLK_j:      row = 3; col_mask = 0x02; break; // J
-        case SDLK_u:      row = 3; col_mask = 0x01; break; // U
-
-        // Row 4
-        case SDLK_i:      row = 4; col_mask = 0x80; break; // I
-        case SDLK_k:      row = 4; col_mask = 0x40; break; // K
-        case SDLK_7:      row = 4; col_mask = 0x20; break; // 7
-        case SDLK_o:      row = 4; col_mask = 0x10; break; // O
-        case SDLK_l:      row = 4; col_mask = 0x08; break; // L
-        case SDLK_8:      row = 4; col_mask = 0x04; break; // 8
-        case SDLK_COMMA:  row = 4; col_mask = 0x02; break; // ,
-        case SDLK_9:      row = 4; col_mask = 0x01; break; // 9
-
-        // Row 5
-        case SDLK_0:      row = 5; col_mask = 0x80; break; // 0
-        case SDLK_PERIOD: row = 5; col_mask = 0x40; break; // .
-        case SDLK_p:      row = 5; col_mask = 0x20; break; // P
-        case SDLK_MINUS:  row = 5; col_mask = 0x10; break; // -
-        case SDLK_SEMICOLON: row = 5; col_mask = 0x08; break; // ;
-        case SDLK_AT:     row = 5; col_mask = 0x04; break; // @
-        case SDLK_COLON:  row = 5; col_mask = 0x02; break; // :
-        case SDLK_SLASH:  row = 5; col_mask = 0x01; break; // /
-        
-        // Row 6 (Keypad)
-        case SDLK_KP_1:   row = 6; col_mask = 0x80; break;
-        case SDLK_KP_4:   row = 6; col_mask = 0x40; break;
-        case SDLK_KP_7:   row = 6; col_mask = 0x20; break;
-        case SDLK_KP_2:   row = 6; col_mask = 0x10; break;
-        case SDLK_KP_5:   row = 6; col_mask = 0x08; break;
-        case SDLK_KP_8:   row = 6; col_mask = 0x04; break;
-        case SDLK_KP_3:   row = 6; col_mask = 0x02; break;
-        case SDLK_KP_6:   row = 6; col_mask = 0x01; break;
-
-        // Row 7 (Keypad)
-        case SDLK_KP_9:   row = 7; col_mask = 0x80; break;
-        case SDLK_KP_PERIOD: row = 7; col_mask = 0x40; break;
-        case SDLK_KP_0:   row = 7; col_mask = 0x20; break;
-        // ...
-        
-        default:
-            return 0; // Unmapped
+static int find_pet_key(uint8_t pet_code, int* row, int* col) {
+    for (int k = 0; k < 80; ++k) {
+        if (pet_key_table[k] == pet_code) {
+            *row = 9 - k / 8;
+            *col = 7 - k % 8;
+            return 1;
+        }
     }
-
-    if (press) {
-        // Active-low: set bit to 0
-        pet_keyboard_matrix[row] &= ~col_mask;
-    } else {
-        // Active-low: set bit to 1
-        pet_keyboard_matrix[row] |= col_mask;
-    }
-    
-    return 1;
+    return 0;
 }
 
+void queue_pet_key(uint8_t pet_code, int shift) {
+    int next = (key_queue_tail + 1) % KEY_QUEUE_SIZE;
+    if (next == key_queue_head) return; // full
+    key_queue[key_queue_tail].pet_code = pet_code;
+    key_queue[key_queue_tail].shift = (uint8_t)shift;
+    key_queue_tail = next;
+}
+
+// Queue a host (ASCII) character: lower-case letters are the plain PET
+// key, upper-case letters are SHIFT+key (graphics in graphics mode,
+// capitals in text mode). '\n' is RETURN.
+void queue_ascii_char(char ch) {
+    if (ch == '\n' || ch == '\r') { queue_pet_key(0x0D, 0); return; }
+    if (ch >= 'a' && ch <= 'z') { queue_pet_key((uint8_t)(ch - 32), 0); return; }
+    if (ch >= 'A' && ch <= 'Z') { queue_pet_key((uint8_t)ch, 1); return; }
+    int row, col;
+    if (find_pet_key((uint8_t)ch, &row, &col)) queue_pet_key((uint8_t)ch, 0);
+}
+
+void queue_ascii_string(const char* text) {
+    for (; *text; ++text) {
+        if (text[0] == '\\' && text[1] == 'n') { queue_ascii_char('\n'); ++text; continue; }
+        if (strncmp(text, "{stop}", 6) == 0) { queue_pet_key(0x03, 0); text += 5; continue; }
+        queue_ascii_char(*text);
+    }
+}
+
+static void set_matrix_key(int row, int col, int press) {
+    if (press) pet_keyboard_matrix[row] &= (uint8_t)~(1 << col);
+    else pet_keyboard_matrix[row] |= (uint8_t)(1 << col);
+}
+
+// Called once per video frame to press/release queued keys.
+void service_key_queue(void) {
+    if (key_timer > 0) { key_timer--; return; }
+    if (key_down) {
+        PetKeyPress* kp = &key_queue[key_queue_head];
+        int row, col;
+        if (find_pet_key(kp->pet_code, &row, &col)) set_matrix_key(row, col, 0);
+        if (kp->shift) set_matrix_key(PET_SHIFT_ROW, PET_SHIFT_COL, 0);
+        key_queue_head = (key_queue_head + 1) % KEY_QUEUE_SIZE;
+        key_down = 0;
+        key_timer = KEY_GAP_FRAMES;
+        return;
+    }
+    if (key_queue_head != key_queue_tail) {
+        PetKeyPress* kp = &key_queue[key_queue_head];
+        int row, col;
+        if (kp->shift) set_matrix_key(PET_SHIFT_ROW, PET_SHIFT_COL, 1);
+        if (find_pet_key(kp->pet_code, &row, &col)) set_matrix_key(row, col, 1);
+        key_down = 1;
+        key_timer = KEY_HOLD_FRAMES;
+    }
+}
+
+int key_queue_empty(void) {
+    return key_queue_head == key_queue_tail && !key_down;
+}
+
+/**
+ * Maps SDL keys that don't produce text (RETURN, DEL, cursors, STOP, RVS)
+ * to PET key presses. Printable characters arrive as SDL_TEXTINPUT.
+ * Returns 1 if a key was mapped, 0 otherwise.
+ */
+int map_sdl_key_to_pet(SDL_Keycode key, SDL_Keymod mod) {
+    int shift = (mod & KMOD_SHIFT) != 0;
+    switch (key) {
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:  queue_pet_key(0x0D, 0); return 1;
+        case SDLK_BACKSPACE: queue_pet_key(0x14, 0); return 1;     // DEL
+        case SDLK_INSERT:    queue_pet_key(0x14, 1); return 1;     // INST
+        case SDLK_HOME:      queue_pet_key(0x13, shift); return 1; // HOME / CLR
+        case SDLK_DELETE:    queue_pet_key(0x13, 1); return 1;     // CLR screen
+        case SDLK_RIGHT:     queue_pet_key(0x1D, 0); return 1;
+        case SDLK_LEFT:      queue_pet_key(0x1D, 1); return 1;
+        case SDLK_DOWN:      queue_pet_key(0x11, 0); return 1;
+        case SDLK_UP:        queue_pet_key(0x11, 1); return 1;
+        case SDLK_ESCAPE:    queue_pet_key(0x03, 0); return 1;     // RUN/STOP
+        case SDLK_TAB:       queue_pet_key(0x12, shift); return 1; // RVS ON / OFF
+        default: return 0;
+    }
+}
 
 // --- SDL Initialization ---
 int init_sdl(void) {
@@ -1106,7 +1094,7 @@ int init_sdl(void) {
     window = SDL_CreateWindow("Commodore PET 2001-N Emulator",
                               SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               WINDOW_WIDTH, WINDOW_HEIGHT,
-                              SDL_WINDOW_SHOWN);
+                              SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) { /* ... error ... */ return 0; }
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -1119,7 +1107,14 @@ int init_sdl(void) {
     }
     
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    SDL_StartTextInput();
     SDL_RenderSetLogicalSize(renderer, WINDOW_WIDTH / PIXEL_SCALE, WINDOW_HEIGHT / PIXEL_SCALE);
+    screen_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                                       WINDOW_WIDTH / PIXEL_SCALE, WINDOW_HEIGHT / PIXEL_SCALE);
+    if (!screen_texture) {
+        fprintf(stderr, "SDL texture creation failed: %s\n", SDL_GetError());
+        return 0;
+    }
 
     // No more TTF_Init!
 
@@ -1146,6 +1141,7 @@ void cleanup_sdl(void) {
     SDL_CloseAudio();
     // No more TTF_CloseFont
     // No more global texture
+    if (screen_texture) SDL_DestroyTexture(screen_texture);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
     // No more TTF_Quit
@@ -1154,62 +1150,39 @@ void cleanup_sdl(void) {
 
 // --- Render/Update Screen ---
 void render_screen(void) {
-    // PET has a green-on-black screen
-    SDL_SetRenderDrawColor(renderer, 0, 0x22, 0, 0xFF); // Dark green background
-    SDL_RenderClear(renderer);
-
-    // Bright green "pixels"
-    SDL_SetRenderDrawColor(renderer, 0x00, 0xFF, 0x00, 0xFF);
-
-    SDL_Rect pixel_rect = { 0, 0, PIXEL_SCALE, PIXEL_SCALE };
+    // Draw the 320x200 PET display into a texture; SDL scales it to the window.
+    static uint32_t pixels[PET_SCREEN_ROWS * PET_CHAR_HEIGHT][PET_SCREEN_COLS * PET_CHAR_WIDTH];
+    const uint32_t fg = 0xFF33FF66; // PET green phosphor
+    const uint32_t bg = 0xFF001400;
 
     video_debug_frame_counter++;
     if (video_debug_enabled && (video_debug_frame_counter % 60) == 0) {
-        uint8_t top_left = readByte(PET_SCREEN_RAM_START);
-        uint8_t cursor_cell = readByte(PET_SCREEN_RAM_START + 24);
-        video_debug_log("[video] frame=%u charset=%d top_left=0x%02X col24=0x%02X total_screen_writes=%u\n",
-                        video_debug_frame_counter, pet_char_set, top_left, cursor_cell, video_screen_write_count);
+        video_debug_log("[video] frame=%u charset=%d top_left=0x%02X total_screen_writes=%u\n",
+                        video_debug_frame_counter, pet_char_set,
+                        memory[PET_SCREEN_RAM_START], video_screen_write_count);
     }
 
     for (int y = 0; y < PET_SCREEN_ROWS; ++y) {
         for (int x = 0; x < PET_SCREEN_COLS; ++x) {
-            // Read from PET's screen RAM at 0x8000
-            uint16_t mem_addr = PET_SCREEN_RAM_START + (y * PET_SCREEN_COLS) + x;
-            uint8_t screen_code = readByte(mem_addr);
-            
-            // KERNAL flips bit 7 for reverse video
-            int is_reverse = screen_code & 0x80;
-            
-            // Look up the 8-byte pixel data for this character.
-            uint16_t char_data_addr = (uint16_t)(screen_code & 0x7F) * 8;
-            
-            // Text/lowercase glyphs are the second 1KB bank.
-            if (pet_char_set == 1) {
-                char_data_addr += 1024; // Add 1KB offset
-            }
-            
-            for (int row = 0; row < 8; ++row) {
-                uint8_t row_pixels = char_rom[char_data_addr + row];
-                
-                for (int col = 0; col < 8; ++col) {
-                    // Is the pixel "on"? (Bit is 1)
-                    int is_pixel_on = (row_pixels & (0x80 >> col)) != 0;
-                    
-                    // Handle reverse video
-                    if (is_reverse) {
-                        is_pixel_on = !is_pixel_on;
-                    }
-
-                    if (is_pixel_on) {
-                        pixel_rect.x = (x * PET_CHAR_WIDTH + col) * PIXEL_SCALE;
-                        pixel_rect.y = (y * PET_CHAR_HEIGHT + row) * PIXEL_SCALE;
-                        SDL_RenderFillRect(renderer, &pixel_rect);
-                    }
+            uint8_t screen_code = memory[PET_SCREEN_RAM_START + y * PET_SCREEN_COLS + x];
+            // Bit 7 = reverse video (done by the video hardware, not the ROM)
+            uint8_t invert = (screen_code & 0x80) ? 0xFF : 0x00;
+            // 128 glyphs per 1K bank; bank 1 is the text/lowercase set
+            const uint8_t* glyph = &char_rom[(pet_char_set ? 1024 : 0) + (screen_code & 0x7F) * 8];
+            for (int row = 0; row < PET_CHAR_HEIGHT; ++row) {
+                uint8_t bits = glyph[row] ^ invert;
+                uint32_t* out = &pixels[y * PET_CHAR_HEIGHT + row][x * PET_CHAR_WIDTH];
+                for (int col = 0; col < PET_CHAR_WIDTH; ++col) {
+                    out[col] = (bits & (0x80 >> col)) ? fg : bg;
                 }
             }
         }
     }
 
+    SDL_UpdateTexture(screen_texture, NULL, pixels, sizeof(pixels[0]));
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, screen_texture, NULL, NULL);
     SDL_RenderPresent(renderer);
 }
 
@@ -1253,15 +1226,13 @@ int load_pet_roms() {
     // 8KB BASIC 2.0 ROM
     if (!load_rom_file("basic-2.901465-01-02.bin", 0xC000, 0x2000)) return 0;
     
-    // 2KB Edit ROM (for 'N' models)
-    if (!load_rom_file("edit-1-n.901439-03.bin", 0xE000, 0x0800)) return 0;
+    // 2KB Editor ROM for BASIC 2 on the 'N' (graphics keyboard) models.
+    // It must match the KERNAL: the KERNAL's IRQ vector ($E61B) and reset
+    // path call straight into this ROM.
+    if (!load_rom_file("edit-2-n.901447-24.bin", 0xE000, 0x0800)) return 0;
     
     // 4KB KERNAL 2.0 ROM
     if (!load_rom_file("kernal-2.901465-03.bin", 0xF000, 0x1000)) return 0;
-    
-    // Patch KERNAL: Change RTS to RTI at $F026D (IRQ handler at $F024A)
-    // This makes the KERNAL IRQ handler properly return with RTI
-    memory[0xF26D] = 0x40; // RTI instead of RTS
     
     // 2KB Character ROM (for 'N' models, business font)
     if (!load_rom_file("characters-2.901447-10.bin", 0, 0x0800)) return 0;
@@ -1375,11 +1346,49 @@ int check_rom_opcodes() {
 }
 
 
+// --- Frame Runner ---
+
+// Run the CPU for one PET video frame, ticking the I/O chips per instruction.
+void run_frame(C6502* cpu) {
+    int cycles_this_frame = 0;
+    while (cycles_this_frame < PET_FRAME_CYCLES && !cpu->halted) {
+        int cycles = cpu_step(cpu);
+        pet_tick(cycles);
+        cycles_this_frame += cycles;
+    }
+}
+
+// Print screen RAM as ASCII (screen codes: 0 = @, 1-26 = A-Z, 32-63 as ASCII).
+void dump_screen_text(FILE* out) {
+    for (int y = 0; y < PET_SCREEN_ROWS; ++y) {
+        char line[PET_SCREEN_COLS + 1];
+        for (int x = 0; x < PET_SCREEN_COLS; ++x) {
+            uint8_t code = memory[PET_SCREEN_RAM_START + y * PET_SCREEN_COLS + x] & 0x7F;
+            char ch = '?';
+            if (code == 0) ch = '@';
+            else if (code < 27) ch = (char)('A' + code - 1);
+            else if (code >= 32 && code < 64) ch = (char)code;
+            else if (code == 27) ch = '[';
+            else if (code == 29) ch = ']';
+            else if (code == 30) ch = '^';
+            line[x] = ch;
+        }
+        line[PET_SCREEN_COLS] = 0;
+        fprintf(out, "%s\n", line);
+    }
+}
+
 // --- Main Program ---
 int main(int argc, char* argv[]) {
     int check_roms_mode = 0;
+    int headless_frames = 0;
+    const char* type_text = NULL;
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--check-roms") == 0) {
+        if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) {
+            headless_frames = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
+            type_text = argv[++i];
+        } else if (strcmp(argv[i], "--check-roms") == 0) {
             check_roms_mode = 1;
         } else if (strcmp(argv[i], "--video-debug") == 0) {
             video_debug_enabled = 1;
@@ -1395,6 +1404,7 @@ int main(int argc, char* argv[]) {
     memset(&memory, 0, sizeof(memory));
     memset(&char_rom, 0, sizeof(char_rom));
     memset(&pia1, 0, sizeof(pia1));
+    memset(&pia2, 0, sizeof(pia2));
     memset(&via, 0, sizeof(via));
     
     // Initialize keyboard matrix (all keys up = 0xFF)
@@ -1410,84 +1420,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // --- Initialize VIA Timer 1 for 60Hz interrupt ---
-    // 1MHz / 60Hz = 16666 cycles = 0x411A
-    via.t1ll = 0x1A;
-    via.t1lh = 0x41;
-    via.t1cl = 0x1A;
-    via.t1ch = 0x41;
-    via.acr = 0x40;  // Timer 1 continuous mode (bit 6)
-    via.ier = 0xC0;  // Enable timer 1 interrupt (bit 6) + bit 7 for setting
-    via.ifr = 0x00;
-    // Initialize PB1 as output for charset select (DDRB bit 1 = 1)
-    via.ddrb = 0x02;
-    via.orb = 0x00;  // Start with graphics/uppercase (bit 1 = 0)
-    update_charset_from_via();
-    
-    // --- Fix PIA1 for keyboard scanning ---
-    // Edit ROM init sets DDRA=0x0F but keyboard needs all 8 rows (0xFF)
-    // PIA1 at $E810: Port A = row select (output), Port B = column read (input)
-    pia1.ddra = 0xFF;  // All 8 rows as outputs
-    pia1.ddrb = 0x00;  // All 8 columns as inputs
-    pia1.cra = 0x3C;   // Port A register selected, CA1/CA2 interrupts disabled
-    pia1.crb = 0x3D;   // Port B register selected, CB1/CB2 interrupts disabled
-    pia1.porta = 0xFF; // All rows deselected (high)
-    pia1.portb = 0xFF; // Columns pulled high
-    
-    // --- Patch Edit ROM: Fix boot sequence ---
-    // The Edit ROM at $E1DE has JMP $CB88 (BASIC) as first instruction,
-    // but hardware init code follows (unreachable). Patch to run init first.
-    // Original: 4C 88 CB (JMP $CB88) at $E1DE
-    // Patch: Replace with hardware init routine ending with JMP $CB88
-    // The hardware init code at $E1E1-$E272 initializes VIA, PIA, clears screen
-    // We'll NOP the JMP and let it fall through to the init code
-    memory[0xE1DE] = 0xEA; // NOP
-    memory[0xE1DF] = 0xEA; // NOP
-    memory[0xE1E0] = 0xEA; // NOP
-    // Now execution falls through to $E1E1 (hardware init) which ends at $E272 with RTS
-    // But the init code ends with RTS at $E272, not JMP BASIC.
-    // The init routine at $E1DE (after patch) does RTS at $E272.
-    // Then KERNAL at $FCD8 continues with zero page init and jumps to BASIC.
-    // This should work!
-    
-    // --- Patch Edit ROM: Preserve VIA Timer 1 interrupt ---
-    // At $E1DA: A9 7F 8D 4E E8 = LDA #$7F; STA $E84E (VIA IER)
-    // 0x7F clears all interrupts (bit 7=0, bits 0-6=1). Patch to 0x3F to preserve timer 1 (bit 6).
-    memory[0xE1DB] = 0x3F; // LDA #$3F (preserve bit 6 = timer 1)
-    // At $E1E1: A9 7F 8D 4E E8 = LDA #$7F; STA $E84E (second occurrence)
-    memory[0xE1E2] = 0x3F; // LDA #$3F (preserve bit 6 = timer 1)
-    
-    // --- Patch KERNAL ROM: Fix IRQ vector ---
-    // KERNAL ROM at $FFFE points to $E61B (screen clear) which JMPs to $E5DB
-    // but uses JMP not JSR, causing stack corruption. Point directly to IRQ handler at $E5DB.
-    memory[0xFFFE] = 0xDB; // Low byte of $E5DB
-    memory[0xFFFF] = 0xE5; // High byte of $E5DB
-    
-    // --- Patch Edit ROM: Prevent overwriting VIA Timer 1 latch ---
-    // At $E5CA: 8D 45 E8 = STA $E845 (T1L-H) with value 0xFE
-    // This overwrites our timer 1 high latch (0x41 for 16666 cycles).
-    // NOP it out to preserve our timer setting.
-    memory[0xE5CA] = 0xEA; // NOP
-    memory[0xE5CB] = 0xEA; // NOP
-    memory[0xE5CC] = 0xEA; // NOP
-    
-    // Also initialize zero page vectors that BASIC expects
-    // KERNAL at $FCD8 sets: $94=$89, $95=$C3, $92=$17, $93=$FD, $03FA=$E7, $03FB=$F7
-    memory[0x94] = 0x89;
-    memory[0x95] = 0xC3;
-    memory[0x92] = 0x17;
-    memory[0x93] = 0xFD;
-    memory[0x03FA] = 0xE7;
-    memory[0x03FB] = 0xF7;
-    // BASIC also expects CHROUT vector at $0326/$0327? Let's check common vectors.
-    // CHROUT vector at $FFD2 = $F232 (KERNAL)
-    // But BASIC might use $0326 for CHROUT
-    memory[0x0326] = 0x32;
-    memory[0x0327] = 0xF2;
-    // CHRIN at $0324/$0325
-    memory[0x0324] = 0x8A; // KERNAL CHRIN at $F18A?
-    memory[0x0325] = 0xF1;
-    
     // --- ROM Linter Mode ---
     if (check_roms_mode) {
         if (check_rom_opcodes()) {
@@ -1498,7 +1430,22 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Init ---
-    cpu_reset(&cpu); // This will now read the KERNAL's reset vector
+    cpu_reset(&cpu); // reads the KERNAL's reset vector
+
+    if (headless_frames > 0) {
+        // Run without a window and print the screen as text (for testing)
+        // Let it boot, then type any --type text, then run the remaining frames
+        for (int frame = 0; frame < 120; ++frame) run_frame(&cpu);
+        if (type_text) queue_ascii_string(type_text);
+        while (!key_queue_empty()) {
+            service_key_queue();
+            run_frame(&cpu);
+        }
+        for (int frame = 0; frame < headless_frames; ++frame) run_frame(&cpu);
+        dump_screen_text(stdout);
+        return 0;
+    }
+
     if (!init_sdl()) {
         return 1;
     }
@@ -1510,46 +1457,24 @@ int main(int argc, char* argv[]) {
     }
 
     int quit = 0;
+    int frames_run = 0;
     SDL_Event e;
-    int cycles_this_frame = 0;
-    const int cycles_per_frame = 1000000 / 60; // 1MHz / 60Hz
 
-    // --- Main Emulation Loop ---
-    int frame_count = 0;
+    // --- Main Emulation Loop (one PET video frame per pass, paced by vsync) ---
     while (!quit && !cpu.halted) {
-        frame_count++;
-        if (frame_count % 600 == 0) {
-            fprintf(stderr, "[main] Frame %d, PC=0x%04X, halted=%d, quit=%d\n", frame_count, cpu.reg_PC, cpu.halted, quit);
-        }
-        // --- Event Handling ---
         while (SDL_PollEvent(&e) != 0) {
             if (e.type == SDL_QUIT) {
                 quit = 1;
-            }
-            else if (e.type == SDL_KEYDOWN) {
-                map_sdl_key_to_pet(e.key.keysym.sym, 1); // 1 = press
-            }
-            else if (e.type == SDL_KEYUP) {
-                map_sdl_key_to_pet(e.key.keysym.sym, 0); // 0 = release
+            } else if (e.type == SDL_KEYDOWN) {
+                map_sdl_key_to_pet(e.key.keysym.sym, (SDL_Keymod)e.key.keysym.mod);
+            } else if (e.type == SDL_TEXTINPUT) {
+                queue_ascii_string(e.text.text);
             }
         }
 
-        // --- CPU Emulation ---
-        cycles_this_frame = 0;
-        while (cycles_this_frame < cycles_per_frame && !cpu.halted) {
-            cycles_this_frame += cpu_step(&cpu);
-        }
-        
-        // --- Hardware Timer ---
-        // Update VIA Timer 1 and check for interrupt
-        int timer_irq = update_via_timer(cycles_this_frame);
-        if (timer_irq) {
-            cpu.irq_pending = 1;
-            // Run keyboard scan (emulator-level, not ROM routine)
-            scan_keyboard();
-        }
-
-        // --- Render Frame ---
+        if (type_text && ++frames_run == 120) queue_ascii_string(type_text); // after boot
+        service_key_queue();
+        run_frame(&cpu);
         render_screen();
     }
 

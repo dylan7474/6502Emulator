@@ -4,7 +4,7 @@ set -euo pipefail
 
 PROJECT_NAME="6502Emulator"
 REQUIRED_TOOLS=(gcc make sdl2-config)
-REQUIRED_PKGCONFIG_LIBS=(sdl2 SDL2_mixer SDL2_ttf libcurl)
+REQUIRED_PKGCONFIG_LIBS=(sdl2)
 
 MISSING_ITEMS=()
 

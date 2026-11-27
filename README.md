@@ -2,25 +2,37 @@
 
 6502Emulator is a hobbyist Commodore PET 2001-N system emulator written in C with SDL2. It loads bundled ROM images and font data to reproduce the PET boot experience, render characters using the actual character generator ROM, and respond to keyboard input. The goal of the project is to offer a lightweight, hackable codebase for experimenting with 6502 CPU emulation and retro-style graphics/audio.
 
-## Current Status (v0.3)
+## Current Status (v0.4)
 
-**✅ Display fixed** - Emulator now boots to a stable blank screen (40×25 spaces in text/lowercase mode) instead of garbage.
+**✅ Boots to BASIC.** The emulator now starts like a real 32K PET 2001-N with BASIC 2:
 
-**✅ Working:**
-- Complete 6502 CPU core (all official + common illegal opcodes)
-- PET 2001-N KERNAL/BASIC/Edit ROM loading
-- Character ROM rendering (8×8 glyphs, reverse video)
-- VIA 6522 emulation (Port B charset select, Timer 1 continuous mode for 60Hz IRQs)
-- PIA 6520 keyboard matrix (active-low, 10×8, proper row scanning)
-- 60Hz timer interrupts via VIA Timer 1
-- Audio callback (square wave via PET's fantasy sound registers)
-- IRQ handling with proper vector ($E5DB) and RTI return
+```
+### COMMODORE BASIC ###
 
-**🔧 Known Issues:**
-- BASIC main loop waits for keyboard input (no key pressed in headless test)
-- No disk/1541 drive emulation
-- No SID audio emulation
-- No debugger overlay
+ 31743 BYTES FREE
+
+READY.
+```
+
+Typing, line editing, LIST/RUN, floating-point maths, the TI/TI$ jiffy clock, RUN/STOP and both character sets work. No ROM bytes are patched.
+
+**Working:**
+- 6502 CPU core (all official + common illegal opcodes, decimal mode for ADC/SBC)
+- PET 2001-N memory map: 32K RAM, 1K screen mirrored to $8FFF, open bus at $9000-$BFFF
+- BASIC 2 (901465-01/02), Editor (901447-24) and KERNAL (901465-03) ROMs
+- PIA1 keyboard: 10x8 matrix, row number on PA0-3, diagnostic sense PA7 high
+- 60 Hz IRQ from vertical retrace (PIA1 CB1), retrace input on VIA PB5
+- VIA 6522 timers 1 and 2, charset select on CA2 (POKE 59468,12 / 14)
+- Sound from the VIA shift register on CB2 (POKE 59467,16 : POKE 59466,15 : POKE 59464,pitch)
+- Character ROM rendering with reverse video, scaled to a resizable window
+
+**🔧 Not yet:**
+- Cassette (datasette) and IEEE-488 disk drives
+- Loading .PRG files
+- Debugger overlay
+
+### Why it didn't boot before (fixed in v0.4)
+The repo loaded the **BASIC 1** editor ROM (`edit-1-n.901439-03`) next to the **BASIC 2** KERNAL. The KERNAL's reset path and IRQ vector ($E61B) jump into the editor ROM, so every call landed in the middle of unrelated code. The earlier "fixes" (patching the IRQ vector, NOP'ing editor code, forcing a VIA timer) worked around that mismatch. v0.4 loads the matching `edit-2-n.901447-24` ROM, removes all ROM patches and models the I/O the way the 2001-N hardware does. It also fixes an SBC carry bug (carry was always set) and a render bug that only drew the top-left quarter of the screen.
 
 ## Build Instructions
 
@@ -36,7 +48,7 @@
 3. The resulting `6502` executable is produced in the project root.
 
 ### Windows (MSYS2 or MinGW environments)
-1. Ensure SDL2, SDL2_mixer, SDL2_ttf, and libcurl development packages are installed (e.g., via `pacman -S mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_mixer mingw-w64-x86_64-SDL2_ttf mingw-w64-x86_64-curl`).
+1. Ensure the SDL2 development package is installed (e.g., via `pacman -S mingw-w64-x86_64-SDL2`).
 2. Build with the standard Makefile (cross-compiles via MinGW):
    ```bash
    make CC=x86_64-w64-mingw32-gcc
@@ -45,41 +57,32 @@
 
 ## Basic Controls
 
-The emulator maps the Commodore PET keyboard matrix to modern keyboards using SDL2. Highlights include:
+The PET 2001-N has a graphics keyboard: letters are upper case, and SHIFT+letter gives a graphics character (or a capital in text mode). Characters you type are sent to the matching PET key, so `"`, `$`, `(`, `*` and so on work as printed on your keyboard.
 
-- Arrow keys for cursor movement, Enter for RETURN, and Backspace for DEL.
-- Standard alphanumeric keys (`A`-`Z`, `0`-`9`) mapped to their PET counterparts.
-- Punctuation keys such as `,`, `.`, `/`, `-`, `;`, and `:` mapped to the expected symbols.
-- Function keys F1/F3/F5/F7 and keypad keys for additional matrix rows.
-- Left/Right Shift operate as the Commodore SHIFT keys; Space inserts blanks.
+| PC key | PET key |
+|---|---|
+| Letters, digits, punctuation | the same character |
+| Shift+letter | SHIFT+letter (graphics / capitals) |
+| Enter | RETURN |
+| Backspace / Insert | DEL / INST |
+| Arrow keys | cursor keys |
+| Home / Shift+Home or Delete | HOME / CLR |
+| Esc | RUN/STOP |
+| Tab / Shift+Tab | RVS ON / OFF |
 
-## Debug Options
+## Command-line Options
 
 ```bash
-./6502 --check-roms      # Verify all ROM opcodes are implemented
-./6502 --video-debug     # Enable verbose video/VIA logging
-PET_VIDEO_DEBUG=1 ./6502 # Same via environment variable
+./6502                                   # normal windowed run
+./6502 --type '10 print "hi"\nrun\n'      # type text after boot (\n = RETURN, {stop} = RUN/STOP)
+./6502 --headless 60 --type 'print 2+2\n' # no window: boot, type, run 60 frames, print the screen
+./6502 --check-roms                      # verify all ROM opcodes are implemented
+./6502 --video-debug                     # verbose video/VIA logging (or PET_VIDEO_DEBUG=1)
 ```
-
-## Display Fix Details (v0.3)
-
-The garbage display on boot was caused by multiple issues:
-
-1. **VIA charset select** - Fixed to use ORB/DDRB bit 1 (PB1 output) instead of PCR bit 1
-2. **VIA Timer 1** - Added 6522 timer emulation with continuous mode for 60Hz IRQs
-3. **Edit ROM IER writes** - Patched two `LDA #$7F/STA $E84E` sequences to `LDA #$3F` to preserve timer 1 interrupt
-4. **Edit ROM T1L-H write** - NOP'd `STA $E845` at $E5CA that overwrote timer 1 high latch
-5. **KERNAL IRQ vector** - Patched $FFFE/$FFFF from $E61B (screen clear) to $E5DB (proper IRQ handler with RTI)
-6. **PIA1 keyboard scan** - Fixed DDRA=0xFF (all 8 rows), implemented proper active-low row scanning
-7. **Emulator keyboard scan** - Added scan during timer IRQ (bypasses buggy Edit ROM routine)
-8. **PIA1 init** - DDRA=0xFF (outputs), DDRB=0x00 (inputs), CRA/CRB configured
-
-Result: stable blank screen (40×25 spaces, text/lowercase charset), 60Hz timer IRQs, proper IRQ handling, runs 30+ seconds without stack corruption.
 
 ## Roadmap
 
-- Fix BASIC main loop to accept keyboard input
-- Implement drive emulation and disk image loading (1541/2031)
-- Expand audio playback support using SID emulation
+- Load .PRG files straight into memory
+- Cassette (.TAP) and IEEE-488 drive emulation (2040/4040 disk images)
 - Provide a debugger overlay for inspecting registers and memory in real time
 - Add cycle-accurate CPU timing and VIA/PIA timer emulation
