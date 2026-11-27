@@ -211,21 +211,55 @@ int update_via_timer(int cycles) {
 }
 
 uint8_t pia_read_porta(void) {
+    // Return actual pin state: outputs drive their register value, inputs float high
     return (pia1.porta & pia1.ddra) | (0xFF & (uint8_t)~pia1.ddra);
 }
 
 uint8_t pia_read_portb(void) {
-    uint8_t selected_rows = pia1.porta;
-    uint8_t key_state = 0xFF;
-
+    // Get actual Port A pin state (outputs only where DDRA=1)
+    uint8_t porta_pins = pia1.porta & pia1.ddra;
+    
+    // Find which row is selected (active low - bit 0 = row selected)
+    // The keyboard matrix has 8 rows on PA0-PA7
+    uint8_t key_state = 0xFF; // All columns high (no key pressed)
+    
     for (int row = 0; row < 8; ++row) {
-        if ((selected_rows & (1 << row)) == 0) {
+        // Check if this row's pin is driven low (selected)
+        if ((porta_pins & (1 << row)) == 0) {
+            // This row is selected, AND with its key matrix state
             key_state &= pet_keyboard_matrix[row];
         }
     }
-
+    
+    // Return Port B pin state: outputs drive register, inputs read key matrix
     return (pia1.portb & pia1.ddrb) | (key_state & (uint8_t)~pia1.ddrb);
 }
+
+// Emulator-level keyboard scan (runs during timer IRQ)
+// Scans all 8 rows of PIA1 keyboard matrix
+void scan_keyboard(void) {
+    // Save current PIA CRA
+    uint8_t saved_cra = pia1.cra;
+    
+    // Ensure CRA bit 2 = 1 (Port A register selected)
+    pia1.cra |= 0x04;
+    
+    // For each row (0-7), drive it low and read columns
+    for (int row = 0; row < 8; ++row) {
+        // Drive this row low (active low), others high
+        pia1.porta = ~(1 << row) & 0xFF;
+        // The pia_read_portb function handles reading the key matrix
+        // when Port B is read by the CPU
+    }
+    
+    // Restore Port A to all high (no row selected)
+    pia1.porta = 0xFF;
+    
+    // Restore CRA
+    pia1.cra = saved_cra;
+}
+
+// Emulator-level keyboard scan (runs during timer IRQ)
 
 /**
  * Reads a single byte from memory.
@@ -265,11 +299,11 @@ uint8_t readByte(uint16_t addr) {
             case VIA_ORA_NH: return (via.ora & via.ddra) | (0xFF & (uint8_t)~via.ddra);
             default: return memory[addr];
         }
-    }
+}
     
     return memory[addr];
 }
-
+ 
 /**
  * Writes a single byte to memory.
  * This now intercepts writes to the keyboard I/O port.
@@ -1390,6 +1424,16 @@ int main(int argc, char* argv[]) {
     via.orb = 0x00;  // Start with graphics/uppercase (bit 1 = 0)
     update_charset_from_via();
     
+    // --- Fix PIA1 for keyboard scanning ---
+    // Edit ROM init sets DDRA=0x0F but keyboard needs all 8 rows (0xFF)
+    // PIA1 at $E810: Port A = row select (output), Port B = column read (input)
+    pia1.ddra = 0xFF;  // All 8 rows as outputs
+    pia1.ddrb = 0x00;  // All 8 columns as inputs
+    pia1.cra = 0x3C;   // Port A register selected, CA1/CA2 interrupts disabled
+    pia1.crb = 0x3D;   // Port B register selected, CB1/CB2 interrupts disabled
+    pia1.porta = 0xFF; // All rows deselected (high)
+    pia1.portb = 0xFF; // Columns pulled high
+    
     // --- Patch Edit ROM: Fix boot sequence ---
     // The Edit ROM at $E1DE has JMP $CB88 (BASIC) as first instruction,
     // but hardware init code follows (unreachable). Patch to run init first.
@@ -1405,6 +1449,27 @@ int main(int argc, char* argv[]) {
     // The init routine at $E1DE (after patch) does RTS at $E272.
     // Then KERNAL at $FCD8 continues with zero page init and jumps to BASIC.
     // This should work!
+    
+    // --- Patch Edit ROM: Preserve VIA Timer 1 interrupt ---
+    // At $E1DA: A9 7F 8D 4E E8 = LDA #$7F; STA $E84E (VIA IER)
+    // 0x7F clears all interrupts (bit 7=0, bits 0-6=1). Patch to 0x3F to preserve timer 1 (bit 6).
+    memory[0xE1DB] = 0x3F; // LDA #$3F (preserve bit 6 = timer 1)
+    // At $E1E1: A9 7F 8D 4E E8 = LDA #$7F; STA $E84E (second occurrence)
+    memory[0xE1E2] = 0x3F; // LDA #$3F (preserve bit 6 = timer 1)
+    
+    // --- Patch KERNAL ROM: Fix IRQ vector ---
+    // KERNAL ROM at $FFFE points to $E61B (screen clear) which JMPs to $E5DB
+    // but uses JMP not JSR, causing stack corruption. Point directly to IRQ handler at $E5DB.
+    memory[0xFFFE] = 0xDB; // Low byte of $E5DB
+    memory[0xFFFF] = 0xE5; // High byte of $E5DB
+    
+    // --- Patch Edit ROM: Prevent overwriting VIA Timer 1 latch ---
+    // At $E5CA: 8D 45 E8 = STA $E845 (T1L-H) with value 0xFE
+    // This overwrites our timer 1 high latch (0x41 for 16666 cycles).
+    // NOP it out to preserve our timer setting.
+    memory[0xE5CA] = 0xEA; // NOP
+    memory[0xE5CB] = 0xEA; // NOP
+    memory[0xE5CC] = 0xEA; // NOP
     
     // Also initialize zero page vectors that BASIC expects
     // KERNAL at $FCD8 sets: $94=$89, $95=$C3, $92=$17, $93=$FD, $03FA=$E7, $03FB=$F7
@@ -1448,7 +1513,6 @@ int main(int argc, char* argv[]) {
     SDL_Event e;
     int cycles_this_frame = 0;
     const int cycles_per_frame = 1000000 / 60; // 1MHz / 60Hz
-    int irq_count = 0;
 
     // --- Main Emulation Loop ---
     int frame_count = 0;
@@ -1478,18 +1542,11 @@ int main(int argc, char* argv[]) {
         
         // --- Hardware Timer ---
         // Update VIA Timer 1 and check for interrupt
-        if (update_via_timer(cycles_this_frame)) {
+        int timer_irq = update_via_timer(cycles_this_frame);
+        if (timer_irq) {
             cpu.irq_pending = 1;
-            irq_count++;
-            // After first IRQ (screen clear), switch to KERNAL IRQ handler at $F024A
-            // (patched to end with RTI instead of RTS). KERNAL loads at 0xF000, so handler is at 0xF24A.
-            if (irq_count == 1) {
-                custom_irq_vector = 0xF24A;
-                use_custom_irq_vector = 1;
-                if (video_debug_enabled) {
-                    printf("[irq] Switching to KERNAL IRQ handler at 0x%04X\n", custom_irq_vector);
-                }
-            }
+            // Run keyboard scan (emulator-level, not ROM routine)
+            scan_keyboard();
         }
 
         // --- Render Frame ---
