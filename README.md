@@ -2,7 +2,7 @@
 
 6502Emulator is a hobbyist Commodore PET 2001-N system emulator written in C with SDL2. It loads bundled ROM images and font data to reproduce the PET boot experience, render characters using the actual character generator ROM, and respond to keyboard input. The goal of the project is to offer a lightweight, hackable codebase for experimenting with 6502 CPU emulation and retro-style graphics/audio.
 
-## Current Status (v0.2)
+## Current Status (v0.3)
 
 **✅ Display fixed** - Emulator now boots to a stable blank screen (40×25 spaces in text/lowercase mode) instead of garbage.
 
@@ -10,13 +10,14 @@
 - Complete 6502 CPU core (all official + common illegal opcodes)
 - PET 2001-N KERNAL/BASIC/Edit ROM loading
 - Character ROM rendering (8×8 glyphs, reverse video)
-- VIA 6522 emulation (Port B charset select, Timer 1 continuous mode)
-- PIA 6520 keyboard matrix (active-low, 10×8)
+- VIA 6522 emulation (Port B charset select, Timer 1 continuous mode for 60Hz IRQs)
+- PIA 6520 keyboard matrix (active-low, 10×8, proper row scanning)
 - 60Hz timer interrupts via VIA Timer 1
 - Audio callback (square wave via PET's fantasy sound registers)
+- IRQ handling with proper vector ($E5DB) and RTI return
 
 **🔧 Known Issues:**
-- BASIC main loop halts after ~20 seconds (keyboard scanning needs refinement)
+- BASIC main loop waits for keyboard input (no key pressed in headless test)
 - No disk/1541 drive emulation
 - No SID audio emulation
 - No debugger overlay
@@ -60,9 +61,24 @@ The emulator maps the Commodore PET keyboard matrix to modern keyboards using SD
 PET_VIDEO_DEBUG=1 ./6502 # Same via environment variable
 ```
 
+## Display Fix Details (v0.3)
+
+The garbage display on boot was caused by multiple issues:
+
+1. **VIA charset select** - Fixed to use ORB/DDRB bit 1 (PB1 output) instead of PCR bit 1
+2. **VIA Timer 1** - Added 6522 timer emulation with continuous mode for 60Hz IRQs
+3. **Edit ROM IER writes** - Patched two `LDA #$7F/STA $E84E` sequences to `LDA #$3F` to preserve timer 1 interrupt
+4. **Edit ROM T1L-H write** - NOP'd `STA $E845` at $E5CA that overwrote timer 1 high latch
+5. **KERNAL IRQ vector** - Patched $FFFE/$FFFF from $E61B (screen clear) to $E5DB (proper IRQ handler with RTI)
+6. **PIA1 keyboard scan** - Fixed DDRA=0xFF (all 8 rows), implemented proper active-low row scanning
+7. **Emulator keyboard scan** - Added scan during timer IRQ (bypasses buggy Edit ROM routine)
+8. **PIA1 init** - DDRA=0xFF (outputs), DDRB=0x00 (inputs), CRA/CRB configured
+
+Result: stable blank screen (40×25 spaces, text/lowercase charset), 60Hz timer IRQs, proper IRQ handling, runs 30+ seconds without stack corruption.
+
 ## Roadmap
 
-- Fix BASIC main loop halt (keyboard scanning / PIA IRQ handling)
+- Fix BASIC main loop to accept keyboard input
 - Implement drive emulation and disk image loading (1541/2031)
 - Expand audio playback support using SID emulation
 - Provide a debugger overlay for inspecting registers and memory in real time
