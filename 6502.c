@@ -1346,6 +1346,64 @@ int check_rom_opcodes() {
 }
 
 
+// --- PRG Loading ---
+
+// BASIC 2 zero-page pointers (same addresses on BASIC 4)
+#define BASIC_TXTTAB 0x28 // start of BASIC program
+#define BASIC_VARTAB 0x2A // start of variables (= end of program)
+#define BASIC_ARYTAB 0x2C // start of arrays
+#define BASIC_STREND 0x2E // end of arrays
+#define BASIC_START  0x0401
+
+/**
+ * Loads a .PRG file (2-byte little-endian load address, then data) into RAM.
+ * A program loaded at the start of BASIC also gets the BASIC pointers set,
+ * as LOAD does, so it can be LISTed and RUN straight away.
+ * Returns 1 on success, 0 on failure.
+ */
+int load_prg_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        return 0;
+    }
+    uint8_t header[2];
+    if (fread(header, 1, 2, f) != 2) {
+        fprintf(stderr, "PRG '%s' is too short\n", path);
+        fclose(f);
+        return 0;
+    }
+    uint16_t load_addr = (uint16_t)(header[0] | (header[1] << 8));
+    static uint8_t data[0x10000];
+    size_t len = fread(data, 1, sizeof(data), f);
+    fclose(f);
+
+    if (len == 0 || (size_t)load_addr + len > PET_RAM_TOP + 0x0400) {
+        // Allow RAM and screen memory ($0000-$83FF), nothing beyond
+        fprintf(stderr, "PRG '%s' ($%04X, %zu bytes) does not fit in PET memory\n",
+                path, load_addr, len);
+        return 0;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        writeByte((uint16_t)(load_addr + i), data[i]);
+    }
+    uint16_t end_addr = (uint16_t)(load_addr + len);
+
+    if (load_addr == BASIC_START) {
+        writeWord(BASIC_VARTAB, end_addr);
+        writeWord(BASIC_ARYTAB, end_addr);
+        writeWord(BASIC_STREND, end_addr);
+        printf("Loaded BASIC program '%s' ($%04X-$%04X)\n", path, load_addr, end_addr - 1);
+    } else {
+        printf("Loaded '%s' at $%04X-$%04X (start with SYS %u)\n",
+               path, load_addr, end_addr - 1, load_addr);
+    }
+    return 1;
+}
+
+// Boot frames to run before loading/typing (BASIC is at READY by then)
+#define PET_BOOT_FRAMES 120
+
 // --- Frame Runner ---
 
 // Run the CPU for one PET video frame, ticking the I/O chips per instruction.
@@ -1383,9 +1441,15 @@ int main(int argc, char* argv[]) {
     int check_roms_mode = 0;
     int headless_frames = 0;
     const char* type_text = NULL;
+    const char* prg_path = NULL;
+    int run_after_load = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) {
             headless_frames = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--load") == 0 && i + 1 < argc) {
+            prg_path = argv[++i];
+        } else if (strcmp(argv[i], "--run") == 0) {
+            run_after_load = 1;
         } else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) {
             type_text = argv[++i];
         } else if (strcmp(argv[i], "--check-roms") == 0) {
@@ -1435,7 +1499,9 @@ int main(int argc, char* argv[]) {
     if (headless_frames > 0) {
         // Run without a window and print the screen as text (for testing)
         // Let it boot, then type any --type text, then run the remaining frames
-        for (int frame = 0; frame < 120; ++frame) run_frame(&cpu);
+        for (int frame = 0; frame < PET_BOOT_FRAMES; ++frame) run_frame(&cpu);
+        if (prg_path && !load_prg_file(prg_path)) return 1;
+        if (prg_path && run_after_load) queue_ascii_string("run\n");
         if (type_text) queue_ascii_string(type_text);
         while (!key_queue_empty()) {
             service_key_queue();
@@ -1467,12 +1533,19 @@ int main(int argc, char* argv[]) {
                 quit = 1;
             } else if (e.type == SDL_KEYDOWN) {
                 map_sdl_key_to_pet(e.key.keysym.sym, (SDL_Keymod)e.key.keysym.mod);
+            } else if (e.type == SDL_DROPFILE) {
+                // Drag a .PRG onto the window to load it (then type RUN or SYS)
+                load_prg_file(e.drop.file);
+                SDL_free(e.drop.file);
             } else if (e.type == SDL_TEXTINPUT) {
                 queue_ascii_string(e.text.text);
             }
         }
 
-        if (type_text && ++frames_run == 120) queue_ascii_string(type_text); // after boot
+        if (++frames_run == PET_BOOT_FRAMES) { // BASIC is at READY
+            if (prg_path && load_prg_file(prg_path) && run_after_load) queue_ascii_string("run\n");
+            if (type_text) queue_ascii_string(type_text);
+        }
         service_key_queue();
         run_frame(&cpu);
         render_screen();

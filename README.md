@@ -25,10 +25,10 @@ Typing, line editing, LIST/RUN, floating-point maths, the TI/TI$ jiffy clock, RU
 - VIA 6522 timers 1 and 2, charset select on CA2 (POKE 59468,12 / 14)
 - Sound from the VIA shift register on CB2 (POKE 59467,16 : POKE 59466,15 : POKE 59464,pitch)
 - Character ROM rendering with reverse video, scaled to a resizable window
+- Loading .PRG files (`--load`, or drag a file onto the window)
 
 **🔧 Not yet:**
 - Cassette (datasette) and IEEE-488 disk drives
-- Loading .PRG files
 - Debugger overlay
 
 ### Why it didn't boot before (fixed in v0.4)
@@ -70,10 +70,20 @@ The PET 2001-N has a graphics keyboard: letters are upper case, and SHIFT+letter
 | Esc | RUN/STOP |
 | Tab / Shift+Tab | RVS ON / OFF |
 
+## Loading Programs
+
+PET software is usually distributed as `.prg` files: two bytes of load address followed by the data.
+
+- **From the command line:** `./6502 --load file.prg` loads it as soon as BASIC is ready; add `--run` to start it.
+- **While running:** drag a `.prg` file onto the window, then type `RUN`.
+
+A BASIC program (load address $0401) also gets BASIC's start/variable/array pointers set, just as `LOAD` does, so `LIST`, `RUN` and editing work straight away. A machine-code file is copied to its own address; the emulator prints the `SYS` address to start it. Files must fit in RAM/screen memory ($0000-$83FF). Programs written for BASIC 4 PETs (4000/8000 series) or for 80 columns may not run on a 2001-N.
+
 ## Command-line Options
 
 ```bash
 ./6502                                   # normal windowed run
+./6502 --load game.prg --run            # load a .PRG after boot, then type RUN
 ./6502 --type '10 print "hi"\nrun\n'      # type text after boot (\n = RETURN, {stop} = RUN/STOP)
 ./6502 --headless 60 --type 'print 2+2\n' # no window: boot, type, run 60 frames, print the screen
 ./6502 --check-roms                      # verify all ROM opcodes are implemented
@@ -82,7 +92,6 @@ The PET 2001-N has a graphics keyboard: letters are upper case, and SHIFT+letter
 
 ## Roadmap
 
-- Load .PRG files straight into memory
 - Cassette (.TAP) and IEEE-488 drive emulation (2040/4040 disk images)
 - Provide a debugger overlay for inspecting registers and memory in real time
 - Add cycle-accurate CPU timing and VIA/PIA timer emulation
